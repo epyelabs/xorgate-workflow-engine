@@ -93,12 +93,11 @@ Hand-written run manifests against `src/engine/manifest.ts`
 (`runManifestSchema`, manifestVersion 2), one per golden case, with LOCAL
 source bindings:
 
-- `overspeed.manifest.json` — binds `n1` with kind `local_telemetry_csv`
-  (does not exist yet; M3 implements it as the file-path analog of the
-  existing `telemetry_csv` kind).
+- `overspeed.manifest.json` — binds `n1` with the EXISTING `telemetry_csv`
+  kind; on the local target the `s3Key` field is resolved as a LOCAL PATH by
+  the fetchText seam (M3 decision: reuse existing kinds, zero executor edits).
 - `perimeter.manifest.json` — binds `n1` with the EXISTING `video_local`
-  kind (`source-video.ts` already ships it for "tests / already-local media");
-  M3 should reuse it rather than invent a `local_video` alias.
+  kind (`source-video.ts` already ships it for "tests / already-local media").
 - `output.bucket` is `"local"`: LocalTargetIO treats the bucket as a label and
   writes `out/<runId>/` mirroring `output.prefix`'s key layout.
 
