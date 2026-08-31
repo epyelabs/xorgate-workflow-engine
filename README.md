@@ -67,8 +67,32 @@ npx xwe run fixtures/templates/perimeter-person-detect.json \
   (`{ "anthropic-api-key": "..." }`); only graphs with connector/VLM nodes
   need any. `--progress json` emits NDJSON status/step/event lines on stdout.
 - ffmpeg: `FFMPEG_PATH`, else PATH, else the `ffmpeg-static` devDependency
-  (docker images apt-install it instead — M4).
+  (docker images apt-install it instead).
+- `--emit-video` muxes each visualization node's annotated frames into
+  `out/<runId>/video/<nodeId>.mp4` (h264, fps from the feeding decode_sample's
+  config). Runner-level only — no catalog node, no cloud impact.
 - Exit codes: 0 success, 1 run failed (failing node named on stderr), 2 usage.
+
+## Docker (the supported path)
+
+```
+docker build -t xwe .                                        # native arch
+docker buildx build --platform linux/amd64,linux/arm64 -t xwe .   # multi-arch
+docker run --rm -v "$PWD":/work xwe \
+    run fixtures/templates/overspeed.json \
+    --input telemetry=fixtures/telemetry/window.csv --out out
+```
+
+The image apt-installs ffmpeg and sets the entrypoint to the CLI; mount your
+workspace (templates, inputs, `fixtures/models`, output dir) at `/work`.
+
+Per host:
+
+| Host | Path |
+|---|---|
+| Linux (amd64/arm64) | docker (supported), or bare node 20 + system ffmpeg |
+| macOS dev machines | bare `node` for development (`ffmpeg-static` covers ffmpeg); docker works too |
+| Raspberry Pi 5 | the arm64 image (proven in M5) |
 
 ## Build / verify
 
