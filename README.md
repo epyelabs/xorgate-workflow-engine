@@ -41,12 +41,42 @@ Only import-path edits were made (the `schemas/workflows` specifiers); zero
 executor-logic changes. `org-credentials.ts` was not needed: only `target.ts`
 imported it.
 
+## Usage (M3: the local runner)
+
+```
+npx xwe validate fixtures/templates/overspeed.json
+npx xwe run fixtures/templates/overspeed.json \
+    --input telemetry=fixtures/telemetry/window.csv --out ./out
+npx xwe run fixtures/templates/perimeter-person-detect.json \
+    --input video=fixtures/video/drive.mp4 --out ./out
+```
+
+- `validate` strict-parses a template against the catalog and prints the
+  required `--input` keys and secrets. `run` also accepts a prebuilt
+  `--manifest manifest.json` instead of a template.
+- Artifacts land in `out/<runId>/` mirroring the cloud S3 run-prefix layout
+  exactly: `events.jsonl`, `outputs/<nodeId>/records.*`,
+  `frames/<nodeId>/<seq>.jpg`, `result.json` written last.
+- Bindings reuse the EXISTING kinds (zero executor edits): `video_local`
+  for video files; `telemetry_csv` / `telemetry_materialized` with `s3Key`
+  resolved as a local path for telemetry.
+- Models resolve from `--models-dir`, else `./fixtures/models`, else
+  `~/.xorgate/models`, in the registry layout
+  (`<family>/<name>/<version>/{manifest.json,model.onnx}`). No network.
+- Secrets: env `XORGATE_SECRET_<LOGICAL_NAME>` or `--secrets secrets.json`
+  (`{ "anthropic-api-key": "..." }`); only graphs with connector/VLM nodes
+  need any. `--progress json` emits NDJSON status/step/event lines on stdout.
+- ffmpeg: `FFMPEG_PATH`, else PATH, else the `ffmpeg-static` devDependency
+  (docker images apt-install it instead — M4).
+- Exit codes: 0 success, 1 run failed (failing node named on stderr), 2 usage.
+
 ## Build / verify
 
 ```
 npm ci
 npm run typecheck
 npm run smoke   # builds, imports runGraph, asserts 26 catalog nodes + no AWS deps
+npm test        # builds, runs the golden overspeed + perimeter fixture runs
 ```
 
 Module system is CommonJS, matching the source's `engine-runner/tsconfig.json`
