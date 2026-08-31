@@ -1,0 +1,127 @@
+{
+  "edges": [
+    {
+      "id": "e1",
+      "source": "vid",
+      "target": "dec",
+      "sourceHandle": "video",
+      "targetHandle": "video"
+    },
+    {
+      "id": "e2",
+      "source": "dec",
+      "target": "det",
+      "sourceHandle": "frames",
+      "targetHandle": "frames"
+    },
+    {
+      "id": "e3",
+      "source": "det",
+      "target": "gate",
+      "sourceHandle": "detections",
+      "targetHandle": "detections"
+    },
+    {
+      "id": "e4",
+      "source": "gate",
+      "target": "evt",
+      "sourceHandle": "condition",
+      "targetHandle": "condition"
+    },
+    {
+      "id": "e5",
+      "source": "dec",
+      "target": "viz",
+      "sourceHandle": "frames",
+      "targetHandle": "frames"
+    },
+    {
+      "id": "e6",
+      "source": "det",
+      "target": "viz",
+      "sourceHandle": "detections",
+      "targetHandle": "detections"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "vid",
+      "data": {
+        "label": "Video",
+        "config": {}
+      },
+      "type": "source.video",
+      "position": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": "dec",
+      "data": {
+        "label": "Decode & Sample",
+        "config": {}
+      },
+      "type": "video.decode_sample",
+      "position": {
+        "x": 0,
+        "y": 140
+      }
+    },
+    {
+      "id": "det",
+      "data": {
+        "label": "Object Detection",
+        "config": {}
+      },
+      "type": "model.object_detection",
+      "position": {
+        "x": 0,
+        "y": 280
+      }
+    },
+    {
+      "id": "gate",
+      "data": {
+        "label": "Person Gate",
+        "config": {
+          "classes": [
+            "person"
+          ]
+        }
+      },
+      "type": "logic.detection_gate",
+      "position": {
+        "x": -220,
+        "y": 420
+      }
+    },
+    {
+      "id": "evt",
+      "data": {
+        "label": "Emit Event",
+        "config": {
+          "kind": "person_at_perimeter"
+        }
+      },
+      "type": "output.event",
+      "position": {
+        "x": -220,
+        "y": 560
+      }
+    },
+    {
+      "id": "viz",
+      "data": {
+        "label": "Visualization",
+        "config": {}
+      },
+      "type": "output.visualization",
+      "position": {
+        "x": 220,
+        "y": 420
+      }
+    }
+  ],
+  "schemaVersion": 2
+}

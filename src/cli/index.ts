@@ -15,6 +15,7 @@ import {
   resolveFfmpeg,
   writeLocalRunArtifacts,
 } from '../local/target';
+import { emitVisualizationVideos } from '../local/emit-video';
 import { captureFormatsOf } from './capture-formats';
 
 /**
@@ -41,6 +42,7 @@ options:
   --models-dir <dir>     model registry root(s); default ./fixtures/models, ~/.xorgate/models
   --secrets <file>       JSON { "<logical-name>": "<value>" }; env XORGATE_SECRET_* also works
   --progress json        emit NDJSON progress on stdout
+  --emit-video           mux visualization frames into out/<runId>/video/<nodeId>.mp4
   --window <from>,<to>   ISO run window (rarely needed locally)`;
 
 function fail(message: string, code = 2): never {
@@ -86,6 +88,7 @@ interface RunFlags {
   modelsDir: string[];
   secrets?: string;
   progress?: string;
+  emitVideo?: boolean;
   window?: string;
 }
 
@@ -174,6 +177,13 @@ async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promis
   }
 
   const result = writeLocalRunArtifacts(runDir, runId, outcome, formats);
+  if (flags.emitVideo && outcome.status === 'succeeded') {
+    await emitVisualizationVideos({
+      runDir,
+      definition: manifest.definition,
+      log: (m) => console.error(`[xwe] ${m}`),
+    });
+  }
   progress?.runStatus({
     status: outcome.status,
     error: outcome.error,
@@ -214,6 +224,7 @@ async function main(): Promise<number> {
         'models-dir': { type: 'string', multiple: true },
         secrets: { type: 'string' },
         progress: { type: 'string' },
+        'emit-video': { type: 'boolean' },
         window: { type: 'string' },
       },
     });
@@ -225,6 +236,7 @@ async function main(): Promise<number> {
       modelsDir: values['models-dir'] ?? [],
       secrets: values.secrets,
       progress: values.progress,
+      emitVideo: values['emit-video'],
       window: values.window,
     });
   }

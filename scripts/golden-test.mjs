@@ -101,6 +101,35 @@ const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
   check('no person event on highway footage', result.events.length === 0);
 }
 
+// --- golden 3: visualization + --emit-video (M4) ----------------------------
+{
+  const res = xwe([
+    'run',
+    'fixtures/templates/perimeter-visualize.json',
+    '--input', 'video=fixtures/video/drive.mp4',
+    '--out', outRoot,
+    '--run-id', 'golden-viz',
+    '--emit-video',
+  ]);
+  check('visualize run exits 0', res.status === 0, res.stderr.split('\n').at(-2) ?? '');
+  console.log(`     (visualize wall time: ${res.seconds.toFixed(1)}s)`);
+
+  const result = readJson(join(outRoot, 'golden-viz', 'result.json'));
+  check('result: succeeded, 6 ok steps', result.status === 'succeeded' && result.steps.length === 6 && result.steps.every((s) => s.status === 'ok'));
+  const viz = result.steps.find((s) => s.nodeId === 'viz');
+  check('viz annotated 50 frames', /^50 annotated frame\(s\)/.test(viz?.output ?? ''), viz?.output);
+
+  const mp4 = join(outRoot, 'golden-viz', 'video', 'viz.mp4');
+  check('video/viz.mp4 emitted', existsSync(mp4));
+  // Decode it back: 50 frames at 2 fps (container metadata, not bytes).
+  const { createRequire } = await import('node:module');
+  const ffmpeg = createRequire(import.meta.url)('ffmpeg-static');
+  const probe = spawnSync(ffmpeg, ['-i', mp4, '-map', '0:v', '-f', 'null', '-'], { encoding: 'utf8' });
+  const frames = [...probe.stderr.matchAll(/frame=\s*(\d+)/g)].at(-1)?.[1];
+  check('muxed mp4 decodes to 50 frames', frames === '50', `frame=${frames}`);
+  check('muxed mp4 is 2 fps h264', /Video: h264/.test(probe.stderr) && / 2 fps/.test(probe.stderr));
+}
+
 // --- failure path: exit 1 names the failing node ----------------------------
 {
   const res = xwe([
