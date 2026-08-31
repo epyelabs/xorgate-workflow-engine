@@ -1,0 +1,141 @@
+{
+  "edges": [
+    {
+      "id": "e1",
+      "source": "src",
+      "target": "roads",
+      "sourceHandle": "telemetry",
+      "targetHandle": "positions"
+    },
+    {
+      "id": "e2",
+      "source": "src",
+      "target": "cmp",
+      "sourceHandle": "telemetry",
+      "targetHandle": "signal"
+    },
+    {
+      "id": "e3",
+      "source": "roads",
+      "target": "cmp",
+      "sourceHandle": "speed_limit",
+      "targetHandle": "reference"
+    },
+    {
+      "id": "e4",
+      "source": "cmp",
+      "target": "deb",
+      "sourceHandle": "condition",
+      "targetHandle": "condition"
+    },
+    {
+      "id": "e5",
+      "source": "deb",
+      "target": "evt",
+      "sourceHandle": "condition",
+      "targetHandle": "condition"
+    },
+    {
+      "id": "e6",
+      "source": "roads",
+      "target": "cap",
+      "sourceHandle": "speed_limit",
+      "targetHandle": "records"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "src",
+      "data": {
+        "label": "Telemetry",
+        "config": {
+          "metrics": [
+            "speed_kph",
+            "gps.latitude",
+            "gps.longitude"
+          ]
+        }
+      },
+      "type": "source.telemetry",
+      "position": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": "roads",
+      "data": {
+        "label": "Connector (OSM)",
+        "config": {
+          "provider": "osm",
+          "maxLookupsPerRun": 60
+        }
+      },
+      "type": "connector.third_party",
+      "position": {
+        "x": 260,
+        "y": 140
+      }
+    },
+    {
+      "id": "cmp",
+      "data": {
+        "label": "Comparator",
+        "config": {
+          "field": "speedLimitKph",
+          "signal": "speed_kph",
+          "operator": "gt"
+        }
+      },
+      "type": "logic.comparator",
+      "position": {
+        "x": 0,
+        "y": 280
+      }
+    },
+    {
+      "id": "deb",
+      "data": {
+        "label": "Debounce",
+        "config": {
+          "cooldownMs": 0,
+          "minDurationMs": 5000
+        }
+      },
+      "type": "logic.debounce",
+      "position": {
+        "x": 0,
+        "y": 420
+      }
+    },
+    {
+      "id": "evt",
+      "data": {
+        "label": "Emit Event",
+        "config": {
+          "kind": "overspeed"
+        }
+      },
+      "type": "output.event",
+      "position": {
+        "x": 0,
+        "y": 560
+      }
+    },
+    {
+      "id": "cap",
+      "data": {
+        "label": "Speed limits",
+        "config": {
+          "format": "jsonl"
+        }
+      },
+      "type": "output.data_capture",
+      "position": {
+        "x": 480,
+        "y": 280
+      }
+    }
+  ],
+  "schemaVersion": 2
+}
