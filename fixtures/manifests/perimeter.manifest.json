@@ -1,0 +1,84 @@
+{
+  "manifestVersion": 2,
+  "runId": "local-perimeter-golden",
+  "mode": "batch",
+  "deviceId": null,
+  "window": null,
+  "definition": {
+    "edges": [
+      { "id": "e1", "source": "n1", "target": "n2" },
+      { "id": "e2", "source": "n2", "target": "n3" },
+      {
+        "id": "e-det-gate",
+        "source": "n3",
+        "target": "gate-m6",
+        "sourceHandle": "detections",
+        "targetHandle": "detections"
+      },
+      {
+        "id": "e-gate-evt",
+        "source": "gate-m6",
+        "target": "n4",
+        "sourceHandle": "condition",
+        "targetHandle": "condition"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n1",
+        "data": { "label": "Video Stream", "config": {} },
+        "type": "source.video",
+        "position": { "x": 40, "y": 200 }
+      },
+      {
+        "id": "n2",
+        "data": { "label": "Decode & Sample", "config": { "fps": 2 } },
+        "type": "video.decode_sample",
+        "position": { "x": 320, "y": 200 }
+      },
+      {
+        "id": "n3",
+        "data": {
+          "label": "Object Detection",
+          "config": { "model": "yolov8n", "minConfidence": 0.4 }
+        },
+        "type": "model.object_detection",
+        "position": { "x": 600, "y": 200 }
+      },
+      {
+        "id": "n4",
+        "data": {
+          "label": "Person at Perimeter",
+          "config": { "kind": "person_at_perimeter", "attachClip": true }
+        },
+        "type": "output.event",
+        "position": { "x": 880, "y": 200 }
+      },
+      {
+        "id": "gate-m6",
+        "data": {
+          "label": "Person gate",
+          "config": { "classes": ["person"], "minCount": 1, "minConfidence": 0.5 }
+        },
+        "type": "logic.detection_gate",
+        "position": { "x": 740, "y": 320 }
+      }
+    ],
+    "schemaVersion": 2
+  },
+  "inputs": [
+    {
+      "nodeId": "n1",
+      "binding": {
+        "kind": "video_local",
+        "path": "fixtures/video/drive.mp4",
+        "startedAt": "2026-08-12T23:56:31.867Z"
+      }
+    }
+  ],
+  "output": {
+    "bucket": "local",
+    "prefix": "workflows/v2/runs/local-perimeter-golden/"
+  },
+  "limits": {}
+}

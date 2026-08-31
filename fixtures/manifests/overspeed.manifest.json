@@ -1,0 +1,71 @@
+{
+  "manifestVersion": 2,
+  "runId": "local-overspeed-golden",
+  "mode": "batch",
+  "deviceId": null,
+  "window": {
+    "from": "2026-08-12T23:56:00.289Z",
+    "to": "2026-08-12T23:58:29.313Z"
+  },
+  "definition": {
+    "edges": [
+      { "id": "e1", "source": "n1", "target": "n2" },
+      { "id": "e2", "source": "n2", "target": "n3" },
+      { "id": "e3", "source": "n3", "target": "n4" }
+    ],
+    "nodes": [
+      {
+        "id": "n1",
+        "data": {
+          "label": "GPS",
+          "config": { "metrics": ["gps.lat", "gps.lon", "gps.speed"] }
+        },
+        "type": "source.telemetry",
+        "position": { "x": 40, "y": 200 }
+      },
+      {
+        "id": "n2",
+        "data": {
+          "label": "Speed from GPS",
+          "config": { "mode": "speed_from_position", "outputSignal": "speed_kph" }
+        },
+        "type": "telemetry.derivative",
+        "position": { "x": 300, "y": 200 }
+      },
+      {
+        "id": "n3",
+        "data": {
+          "label": "Speed Limit Check",
+          "config": { "value": 10, "signal": "speed_kph", "operator": "gt" }
+        },
+        "type": "logic.threshold",
+        "position": { "x": 580, "y": 200 }
+      },
+      {
+        "id": "n4",
+        "data": {
+          "label": "Overspeed",
+          "config": { "kind": "overspeed", "attachClip": true }
+        },
+        "type": "output.event",
+        "position": { "x": 860, "y": 200 }
+      }
+    ],
+    "schemaVersion": 2
+  },
+  "inputs": [
+    {
+      "nodeId": "n1",
+      "binding": {
+        "kind": "local_telemetry_csv",
+        "path": "fixtures/telemetry/window.csv",
+        "metrics": ["gps.lat", "gps.lon", "gps.speed"]
+      }
+    }
+  ],
+  "output": {
+    "bucket": "local",
+    "prefix": "workflows/v2/runs/local-overspeed-golden/"
+  },
+  "limits": {}
+}
