@@ -5,7 +5,9 @@ import { homedir } from 'node:os';
 import * as path from 'node:path';
 import type {
   EngineArtifactSink,
+  EngineEventRecord,
   EngineProgressSink,
+  EngineProgressStep,
   EngineSecretReader,
   EngineSourceReader,
 } from '../catalog/types';
@@ -13,6 +15,7 @@ import type { ModelManifest } from '../models/registry';
 import { modelManifestSchema } from '../models/registry';
 import type { EngineRunOutcome } from '../engine/index';
 import { buildEngineResult, type EngineResult } from '../engine/manifest';
+import { lazyRequire } from '../engine/lazy-require';
 
 /**
  * LocalTargetIO (portable-engine M3): the filesystem shell around the
@@ -31,7 +34,8 @@ import { buildEngineResult, type EngineResult } from '../engine/manifest';
  * - progress is NDJSON on stdout when asked for
  */
 
-const log = (msg: string): void => {
+/** The local host's default diagnostic line: stderr, `[xwe]` prefixed. */
+export const defaultLocalLog = (msg: string): void => {
   console.error(`[xwe] ${msg}`);
 };
 
@@ -43,6 +47,8 @@ export interface LocalSourceOptions {
   modelDirs: string[];
   /** Resolves paths in bindings/refs that are not absolute. Default: cwd. */
   baseDir?: string;
+  /** Diagnostic lines (model resolution). Default: stderr, `[xwe]` prefixed. */
+  log?: (message: string) => void;
 }
 
 /** Default model search path: ./fixtures/models, then ~/.xorgate/models. */
@@ -79,6 +85,7 @@ function resolveLocalModel(
 
 export function localSources(opts: LocalSourceOptions): EngineSourceReader {
   const baseDir = opts.baseDir ?? process.cwd();
+  const log = opts.log ?? defaultLocalLog;
   const abs = (p: string): string => (path.isAbsolute(p) ? p : path.join(baseDir, p));
   const modelCache = new Map<string, Promise<{ manifest: ModelManifest; modelPath: string }>>();
   return {
@@ -201,26 +208,73 @@ export function localSecretReader(deps: {
 // Progress (NDJSON on stdout)
 
 /**
+ * One progress message as `--progress json` prints it: the seam's payload
+ * plus `t` (which method fired) and `at` (ISO timestamp). The message set is
+ * the engine's, frozen; a platform shell publishes the same objects over its
+ * own transport.
+ */
+export type EngineProgressStatusUpdate = Parameters<EngineProgressSink['runStatus']>[0];
+export type EngineProgressRecord = Parameters<NonNullable<EngineProgressSink['record']>>[0];
+export type EngineProgressMessage =
+  | ({ at: string; t: 'status' } & EngineProgressStatusUpdate)
+  | ({ at: string; t: 'step' } & EngineProgressStep)
+  | ({ at: string; t: 'event' } & EngineEventRecord)
+  | ({ at: string; t: 'record' } & EngineProgressRecord);
+
+/**
+ * EngineProgressSink handing each message to a callback as an object, in the
+ * exact shape ndjsonProgress serializes (`at` first, then `t`, then the
+ * payload). `engine.run({ progress })` is built on this.
+ */
+export function objectProgress(emit: (message: EngineProgressMessage) => void): EngineProgressSink {
+  const at = (): string => new Date().toISOString();
+  return {
+    runStatus(update) {
+      emit({ at: at(), t: 'status', ...update });
+    },
+    step(step) {
+      emit({ at: at(), t: 'step', ...step });
+    },
+    event(event) {
+      emit({ at: at(), t: 'event', ...event });
+    },
+    record(rec) {
+      emit({ at: at(), t: 'record', ...rec });
+    },
+  };
+}
+
+/**
  * EngineProgressSink emitting one JSON object per line on the given stream:
- * { t: "status"|"step"|"event"|"record", at: ISO, ... }. Same messages the
+ * { at: ISO, t: "status"|"step"|"event"|"record", ... }. Same messages the
  * cloud publishes to IoT topics (progress.ts payloads), different transport.
  */
 export function ndjsonProgress(write: (line: string) => void): EngineProgressSink {
-  const emit = (obj: Record<string, unknown>): void => {
-    write(JSON.stringify({ at: new Date().toISOString(), ...obj }));
-  };
+  return objectProgress((message) => write(JSON.stringify(message)));
+}
+
+/** Fan one run's progress out to every sink given; undefined when none. */
+export function teeProgress(
+  ...sinks: Array<EngineProgressSink | undefined>
+): EngineProgressSink | undefined {
+  const live = sinks.filter((s): s is EngineProgressSink => s !== undefined);
+  if (live.length === 0) return undefined;
+  if (live.length === 1) return live[0];
   return {
     runStatus(update) {
-      emit({ t: 'status', ...update });
+      for (const s of live) s.runStatus(update);
     },
     step(step) {
-      emit({ t: 'step', ...step });
+      for (const s of live) s.step(step);
     },
     event(event) {
-      emit({ t: 'event', ...event });
+      for (const s of live) s.event(event);
     },
     record(rec) {
-      emit({ t: 'record', ...rec });
+      for (const s of live) s.record?.(rec);
+    },
+    preview(nodeId, frameSeq, jpeg) {
+      for (const s of live) s.preview?.(nodeId, frameSeq, jpeg);
     },
   };
 }
@@ -240,8 +294,7 @@ export function resolveFfmpeg(env: NodeJS.ProcessEnv = process.env): string | nu
   const onPath = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' });
   if (!onPath.error && onPath.status === 0) return 'ffmpeg';
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const ffmpegStatic = require('ffmpeg-static') as string | null;
+    const ffmpegStatic = lazyRequire<string | null>('ffmpeg-static');
     if (ffmpegStatic) {
       env.FFMPEG_PATH = ffmpegStatic;
       return ffmpegStatic;

@@ -1,11 +1,24 @@
-# xorgate-workflow-engine
+# @xorgate/workflow-engine
 
-The portable xorgate workflow engine: `runGraph` plus the full 26-node catalog,
-extracted as a standalone, AWS-free codebase. Inputs are sources (video, CSV,
-JSON, ...) plus a workflow template (JSON, definition schemaVersion 2); outputs
-are model records/events plus a trace (`events.jsonl` + `result.json`), with
-processed video to follow. The local runner (LocalTargetIO + `xwe` CLI) lands
-in later milestones.
+The portable xorgate workflow engine as one npm package: the library
+(`createEngine`, `runGraph`, the full 26-node catalog, every schema) and the
+`xwe` command. Inputs are sources (video, CSV, JSON, ...) plus a workflow
+template (JSON, definition schemaVersion 2); outputs are model records/events
+plus a trace (`events.jsonl` + `result.json`) and, on request, annotated video.
+Not published yet: it runs from this checkout (see Build / verify) until the
+0.1.0 release.
+
+```ts
+import { createEngine } from "@xorgate/workflow-engine"
+import { localHost } from "@xorgate/workflow-engine/local"
+
+const engine = createEngine({ host: localHost({ modelDirs: ["./models"], outDir: "./out" }) })
+const run = await engine.run({ template: "./overspeed.json", inputs: { telemetry: "./window.csv" } })
+console.log(run.result.status, run.result.events.length, run.runDir)
+```
+
+Entry points: `.` (core, catalog, schemas, seams), `./local` (the file host),
+`./testing` (the conformance kit). The CLI is the `bin`, not an export.
 
 Plan and architecture: `xorgate/plans/portable_workflow_engine_architecture/`
 (in the xorgate workspace, not this repo).
@@ -60,8 +73,8 @@ npx xwe run fixtures/templates/perimeter-person-detect.json \
 - Bindings reuse the EXISTING kinds (zero executor edits): `video_local`
   for video files; `telemetry_csv` / `telemetry_materialized` with `s3Key`
   resolved as a local path for telemetry.
-- Models resolve from `--models-dir`, else `./fixtures/models`, else
-  `~/.xorgate/models`, in the registry layout
+- Models resolve from `--models-dir` roots first, then `./fixtures/models`,
+  then `~/.xorgate/models`, in the registry layout
   (`<family>/<name>/<version>/{manifest.json,model.onnx}`). No network.
 - Secrets: env `XORGATE_SECRET_<LOGICAL_NAME>` or `--secrets secrets.json`
   (`{ "anthropic-api-key": "..." }`); only graphs with connector/VLM nodes
@@ -72,6 +85,12 @@ npx xwe run fixtures/templates/perimeter-person-detect.json \
   `out/<runId>/video/<nodeId>.mp4` (h264, fps from the feeding decode_sample's
   config). Runner-level only — no catalog node, no cloud impact.
 - Exit codes: 0 success, 1 run failed (failing node named on stderr), 2 usage.
+- `xwe doctor` prints node, ffmpeg, the ONNX Runtime binding, the VLM client,
+  the model roots and their contents, the registry and the catalog hash; exits
+  1 when ffmpeg or the ONNX binding is missing.
+- A hand-written `--manifest` may say `path` where the platform kinds say
+  `s3Key` (`telemetry_csv`, `telemetry_materialized`, `video_file`, session
+  segments); the local host folds the alias before the engine sees it.
 
 ## Docker (the supported path)
 
@@ -99,9 +118,13 @@ Per host:
 ```
 npm ci
 npm run typecheck
-npm run smoke   # builds, imports runGraph, asserts 26 catalog nodes + no AWS deps
-npm test        # builds, runs the golden overspeed + perimeter fixture runs
+npm run smoke            # builds, loads both module formats, asserts 26 catalog nodes + no cloud deps
+npm test                 # builds, runs the golden runs through the CLI and the library
+npm run verify:tarball   # npm pack, install into fresh projects, run through npx / import / require
+npm run ci               # all of the above
 ```
 
-Module system is CommonJS, matching the source's `engine-runner/tsconfig.json`
-(the copied code uses extensionless relative imports).
+The build is dual ESM + CJS with declaration files (`dist/esm`, `dist/cjs`),
+from one extensionless-import source tree: `scripts/finalize-build.mjs` adds
+the extensions the ESM loader needs and places `import.meta.url` in the one
+file that lazily requires optional packages. The `xwe` bin is the CJS build.

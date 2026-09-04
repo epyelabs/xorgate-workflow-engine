@@ -2,30 +2,21 @@
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { parseArgs } from 'node:util';
-import { runGraph, type EngineRunOutcome } from '../engine/index';
-import { runManifestSchema, type RunManifest } from '../engine/manifest';
-import { upgradeDefinition } from '../compat';
-import { buildLocalManifest, inspectTemplate, loadDefinition } from '../local/manifest-builder';
-import {
-  defaultModelDirs,
-  localArtifactSink,
-  localSecretReader,
-  localSources,
-  ndjsonProgress,
-  resolveFfmpeg,
-  writeLocalRunArtifacts,
-} from '../local/target';
-import { emitVisualizationVideos } from '../local/emit-video';
-import { captureFormatsOf } from './capture-formats';
+import { createEngine, XweUsageError, type EngineRunOptions } from '../create-engine';
+import { inspectTemplate, loadDefinition } from '../local/manifest-builder';
+import { localHost } from '../local/host';
+import { ndjsonProgress, resolveFfmpeg } from '../local/target';
+import { doctorReport } from './doctor';
 
 /**
- * xwe — the portable workflow engine CLI (M3).
+ * xwe — the workflow engine CLI: argument parsing over createEngine + localHost.
  *
  *   xwe validate <template.json>
  *   xwe run <template.json> --input video=./drive.mp4 --input telemetry=./window.csv
  *           [--out ./out] [--run-id id] [--models-dir dir]... [--secrets s.json]
- *           [--progress json] [--window from,to]
+ *           [--progress json] [--emit-video] [--window from,to]
  *   xwe run --manifest <manifest.json> [same flags]
+ *   xwe doctor [--models-dir dir]...
  *
  * Exit codes: 0 success · 1 run failed (failing node named) · 2 usage/config.
  */
@@ -34,12 +25,13 @@ const USAGE = `usage:
   xwe validate <template.json>
   xwe run <template.json> --input <key>=<path> ... [options]
   xwe run --manifest <manifest.json> [options]
+  xwe doctor [--models-dir <dir>]...
 
 options:
   --input <key>=<path>   bind a source node (key: video | telemetry | <nodeId>)
   --out <dir>            artifact root (default ./out); run writes <out>/<runId>/
   --run-id <id>          run id (default local-<timestamp>)
-  --models-dir <dir>     model registry root(s); default ./fixtures/models, ~/.xorgate/models
+  --models-dir <dir>     model registry root(s), searched before ./fixtures/models and ~/.xorgate/models
   --secrets <file>       JSON { "<logical-name>": "<value>" }; env XORGATE_SECRET_* also works
   --progress json        emit NDJSON progress on stdout
   --emit-video           mux visualization frames into out/<runId>/video/<nodeId>.mp4
@@ -93,10 +85,9 @@ interface RunFlags {
 }
 
 async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promise<number> {
-  let manifest: RunManifest;
+  const runOptions: EngineRunOptions = {};
   if (flags.manifest) {
-    manifest = runManifestSchema.parse(JSON.parse(readFileSync(flags.manifest, 'utf8')));
-    manifest = { ...manifest, definition: upgradeDefinition(manifest.definition) };
+    runOptions.manifest = flags.manifest;
   } else if (templatePath) {
     const inputs: Record<string, string> = {};
     for (const pair of flags.input) {
@@ -104,91 +95,41 @@ async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promis
       if (eq <= 0) fail(`--input must be <key>=<path>, got "${pair}"`);
       inputs[pair.slice(0, eq)] = pair.slice(eq + 1);
     }
-    let window: { from: string; to: string } | null = null;
     if (flags.window) {
       const [from, to] = flags.window.split(',');
       if (!from || !to) fail('--window must be <fromISO>,<toISO>');
-      window = { from, to };
+      runOptions.window = { from, to };
     }
-    manifest = buildLocalManifest({
-      definition: loadDefinition(templatePath),
-      inputs,
-      runId: flags.runId ?? `local-${Date.now()}`,
-      window,
-    });
+    runOptions.template = templatePath;
+    runOptions.inputs = inputs;
   } else {
     fail(`run needs a template path or --manifest\n${USAGE}`);
   }
+  if (flags.runId) runOptions.runId = flags.runId;
+  if (flags.emitVideo) runOptions.emitVideo = true;
 
-  const runId = flags.runId ?? manifest.runId;
-  const runDir = path.resolve(flags.out, runId);
-  const formats = captureFormatsOf(manifest.definition);
   const secretsFile = flags.secrets
     ? (JSON.parse(readFileSync(flags.secrets, 'utf8')) as Record<string, string>)
     : undefined;
-  const modelDirs = flags.modelsDir.length > 0 ? flags.modelsDir : defaultModelDirs();
-  const progress = flags.progress === 'json' ? ndjsonProgress((line) => console.log(line)) : undefined;
 
-  const ffmpeg = resolveFfmpeg();
-  if (!ffmpeg) {
+  const engine = createEngine({
+    host: localHost({
+      modelDirs: flags.modelsDir,
+      outDir: flags.out,
+      ...(secretsFile ? { secrets: secretsFile } : {}),
+      ...(flags.progress === 'json' ? { progress: ndjsonProgress((line) => console.log(line)) } : {}),
+    }),
+    log: (m) => console.error(`[engine] ${m}`),
+  });
+
+  if (!resolveFfmpeg()) {
     console.error(
       'xwe: warning: no ffmpeg found (FFMPEG_PATH, PATH, or ffmpeg-static) — video nodes will fail',
     );
   }
 
   const startedAt = Date.now();
-  progress?.runStatus({ status: 'running' });
-  let outcome: EngineRunOutcome;
-  try {
-    outcome = await runGraph(
-      {
-        runId,
-        mode: manifest.mode,
-        deviceId: manifest.deviceId,
-        window: manifest.window
-          ? { fromMs: Date.parse(manifest.window.from), toMs: Date.parse(manifest.window.to) }
-          : null,
-        definition: manifest.definition,
-        bindings: Object.fromEntries(manifest.inputs.map((i) => [i.nodeId, i.binding])),
-      },
-      {
-        sources: localSources({ modelDirs }),
-        artifacts: localArtifactSink(runDir),
-        secrets: localSecretReader({ env: process.env, secretsFile }),
-        ...(progress ? { progress } : {}),
-        ...(manifest.limits.maxRuntimeSeconds
-          ? { deadlineMs: manifest.limits.maxRuntimeSeconds * 1000 }
-          : {}),
-        log: (m) => console.error(`[engine] ${m}`),
-      },
-    );
-  } catch (err) {
-    // Engine-level crash: still land a result.json, like the cloud targets.
-    const message = err instanceof Error ? err.message : String(err);
-    outcome = {
-      status: 'failed',
-      error: message,
-      failedNodeId: null,
-      steps: [],
-      events: [],
-      captures: {},
-      metrics: { nodes: manifest.definition.nodes.length, okSteps: 0, events: 0, messages: 0 },
-    };
-  }
-
-  const result = writeLocalRunArtifacts(runDir, runId, outcome, formats);
-  if (flags.emitVideo && outcome.status === 'succeeded') {
-    await emitVisualizationVideos({
-      runDir,
-      definition: manifest.definition,
-      log: (m) => console.error(`[xwe] ${m}`),
-    });
-  }
-  progress?.runStatus({
-    status: outcome.status,
-    error: outcome.error,
-    failedNodeId: outcome.failedNodeId,
-  });
+  const { result, runDir, outcome } = await engine.run(runOptions);
 
   const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
   console.error(`[xwe] ${outcome.status} in ${seconds}s -> ${path.join(runDir, 'result.json')}`);
@@ -203,6 +144,12 @@ async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promis
   }
   console.error(`  events: ${result.events.length}`);
   return 0;
+}
+
+function cmdDoctor(modelDirs: string[]): number {
+  const report = doctorReport({ modelDirs });
+  for (const line of report.lines) console.log(line);
+  return report.ok ? 0 : 1;
 }
 
 async function main(): Promise<number> {
@@ -240,6 +187,13 @@ async function main(): Promise<number> {
       window: values.window,
     });
   }
+  if (command === 'doctor') {
+    const { values } = parseArgs({
+      args: rest,
+      options: { 'models-dir': { type: 'string', multiple: true } },
+    });
+    return cmdDoctor(values['models-dir'] ?? []);
+  }
   console.error(USAGE);
   return command === undefined || command === '--help' || command === 'help' ? 0 : 2;
 }
@@ -248,6 +202,6 @@ main().then(
   (code) => process.exit(code),
   (err) => {
     console.error(`xwe: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(2);
+    process.exit(err instanceof XweUsageError ? err.exitCode : 2);
   },
 );
