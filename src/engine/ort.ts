@@ -1,3 +1,5 @@
+import { lazyRequire } from './lazy-require';
+
 /**
  * Lazy access to onnxruntime-node, shared by the model executors. The module
  * is a native dependency present only on media-capable targets (the
@@ -23,11 +25,10 @@ export interface OrtModule {
 
 export function loadOrt(): OrtModule {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    return require('onnxruntime-node') as OrtModule;
+    return lazyRequire<OrtModule>('onnxruntime-node');
   } catch {
     throw new Error(
-      'onnxruntime-node is not available on this engine target; model nodes need the media (Fargate) engine',
+      'onnxruntime-node is not installed on this host; model nodes need it (npm install onnxruntime-node, or a default install without --omit=optional)',
     );
   }
 }
