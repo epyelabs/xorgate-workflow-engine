@@ -18,17 +18,25 @@ import type { EngineSourceBinding } from '../catalog/types';
  *   the local fetchText seam resolves s3Key as a local path.
  */
 
-/** A template file: a bare definition, or an API snapshot wrapping one. */
-export function loadDefinition(templatePath: string): WorkflowDefinition {
-  const raw = JSON.parse(readFileSync(templatePath, 'utf8')) as Record<string, unknown>;
-  const candidate = (raw.definition ?? raw) as unknown;
+/**
+ * A parsed template: a bare definition, or an API snapshot wrapping one under
+ * `definition`. v1 graphs are upgraded. `label` names the source in errors.
+ */
+export function parseTemplate(raw: unknown, label = 'template'): WorkflowDefinition {
+  const wrapper = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const candidate = (wrapper.definition ?? raw) as unknown;
   const parsed = workflowDefinitionSchema.safeParse(candidate);
   if (!parsed.success) {
     throw new Error(
-      `${templatePath} is not a workflow definition: ${parsed.error.issues[0]?.message ?? 'parse failed'}`,
+      `${label} is not a workflow definition: ${parsed.error.issues[0]?.message ?? 'parse failed'}`,
     );
   }
   return upgradeDefinition(parsed.data);
+}
+
+/** A template file: a bare definition, or an API snapshot wrapping one. */
+export function loadDefinition(templatePath: string): WorkflowDefinition {
+  return parseTemplate(JSON.parse(readFileSync(templatePath, 'utf8')), templatePath);
 }
 
 export interface TemplateInfo {

@@ -1,26 +1,101 @@
 {
-  "name": "xorgate-workflow-engine",
-  "version": "0.0.1",
-  "private": true,
-  "description": "Portable xorgate workflow engine: runGraph + the full 26-node catalog, extracted from xorgate-core-service. No AWS dependencies.",
+  "name": "@xorgate/workflow-engine",
+  "version": "0.1.0-dev",
+  "description": "The xorgate workflow engine as a library and the xwe command: run workflow templates over video and telemetry files with a 26-node catalog, no platform account required.",
+  "license": "MIT",
+  "author": "Epye Labs",
+  "homepage": "https://docs.xorgate.io/docs/workflows",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/epyelabs/xorgate-workflow-engine.git"
+  },
+  "bugs": {
+    "url": "https://github.com/epyelabs/xorgate-workflow-engine/issues"
+  },
+  "keywords": [
+    "xorgate",
+    "workflow",
+    "engine",
+    "computer-vision",
+    "telemetry",
+    "onnx",
+    "video",
+    "edge",
+    "iot"
+  ],
+  "type": "module",
   "engines": {
     "node": ">=20"
   },
-  "bin": {
-    "xwe": "dist/cli/index.js"
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
   },
+  "bin": {
+    "xwe": "dist/cjs/cli/index.js"
+  },
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./local": {
+      "import": {
+        "types": "./dist/esm/local/index.d.ts",
+        "default": "./dist/esm/local/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/local/index.d.ts",
+        "default": "./dist/cjs/local/index.js"
+      }
+    },
+    "./testing": {
+      "import": {
+        "types": "./dist/esm/testing/index.d.ts",
+        "default": "./dist/esm/testing/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/testing/index.d.ts",
+        "default": "./dist/cjs/testing/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && npm run build:esm && npm run build:cjs && node scripts/finalize-build.mjs",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "npm run build",
     "smoke": "npm run build && node scripts/smoke.mjs",
-    "test": "npm run build && node scripts/golden-test.mjs"
+    "test": "npm run build && node scripts/golden-test.mjs",
+    "verify:tarball": "node scripts/verify-tarball.mjs",
+    "ci": "npm run typecheck && npm run smoke && npm test && npm run verify:tarball"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.111.0",
     "jpeg-js": "^0.4.4",
-    "onnxruntime-node": "^1.19.2",
     "zod": "^3.24.0",
     "zod-to-json-schema": "^3.25.2"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.111.0",
+    "onnxruntime-node": "^1.19.2"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

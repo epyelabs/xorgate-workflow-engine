@@ -1,4 +1,4 @@
-# xorgate-workflow-engine — the portable engine image (M4). Adapted from
+# @xorgate/workflow-engine — the portable engine image. Adapted from
 # xorgate-core-service/engine-runner/Dockerfile; the Fargate session/S3 runner
 # stayed behind, the entrypoint here is the xwe CLI.
 #
@@ -21,9 +21,10 @@ FROM node:20-slim AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci
-COPY tsconfig.json ./
+COPY tsconfig.json tsconfig.esm.json tsconfig.cjs.json ./
+COPY scripts/finalize-build.mjs ./scripts/
 COPY src ./src
-RUN npx tsc -p tsconfig.json
+RUN npm run build
 
 FROM node:20-slim
 
@@ -42,5 +43,5 @@ COPY --from=build /build/dist ./dist
 
 # The mounted workspace: relative template/input/output paths resolve here.
 WORKDIR /work
-ENTRYPOINT ["node", "/app/dist/cli/index.js"]
+ENTRYPOINT ["node", "/app/dist/cjs/cli/index.js"]
 CMD ["--help"]

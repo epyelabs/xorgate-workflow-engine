@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// The repo's regression gate (M3): the overspeed and perimeter golden runs
-// over the M2 fixtures, driven through the real CLI. Run `npm run build` first
-// (`npm test` does).
+// The repo's regression gate: the overspeed and perimeter golden runs over
+// the fixtures, driven through the real CLI, plus the library surface
+// (createEngine + localHost in ESM and CJS), the local `path` alias and
+// `xwe doctor`. Run `npm run build` first (`npm test` does).
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,7 +20,7 @@ function check(name, ok, detail = '') {
 
 function xwe(args) {
   const started = Date.now();
-  const res = spawnSync(process.execPath, [join(root, 'dist/cli/index.js'), ...args], {
+  const res = spawnSync(process.execPath, [join(root, 'dist/cjs/cli/index.js'), ...args], {
     cwd: root,
     encoding: 'utf8',
   });
@@ -146,6 +147,82 @@ const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
     existsSync(join(outRoot, 'golden-fail', 'result.json')) &&
       readJson(join(outRoot, 'golden-fail', 'result.json')).status === 'failed',
   );
+}
+
+// --- usage errors exit 2 and run nothing ----------------------------------
+{
+  const res = xwe(['run', 'fixtures/templates/overspeed.json', '--input', 'bogus=x.csv', '--out', outRoot, '--run-id', 'golden-usage']);
+  check('unbindable input key exits 2', res.status === 2, res.stderr.trim());
+  check('usage error runs nothing', !existsSync(join(outRoot, 'golden-usage')));
+  const missing = xwe(['run', 'does-not-exist.json', '--out', outRoot]);
+  check('missing template file exits 2', missing.status === 2, missing.stderr.trim());
+}
+
+// --- `path` alias in a hand-written local manifest (local host only) -------
+{
+  const manifest = readJson(join(root, 'fixtures/manifests/overspeed.manifest.json'));
+  manifest.runId = 'golden-path-alias';
+  manifest.inputs[0].binding = { kind: 'telemetry_csv', path: 'fixtures/telemetry/window.csv', metrics: manifest.inputs[0].binding.metrics };
+  const file = join(outRoot, 'path-alias.manifest.json');
+  writeFileSync(file, JSON.stringify(manifest));
+  const res = xwe(['run', '--manifest', file, '--out', outRoot]);
+  check('manifest with `path` instead of `s3Key` exits 0', res.status === 0, res.stderr.split('\n').at(-2) ?? '');
+  const result = readJson(join(outRoot, 'golden-path-alias', 'result.json'));
+  check('path alias: same overspeed event', result.status === 'succeeded' && result.events.length === 1 && result.events[0].occurredAt === '2026-08-12T23:56:01.289Z');
+}
+
+// --- the library: createEngine + localHost, ESM and CJS --------------------
+const LIB_BODY = (imports) => `
+  ${imports}
+  const msgs = [];
+  const engine = createEngine({ host: localHost({ outDir: ${JSON.stringify(outRoot)}, baseDir: ${JSON.stringify(root)} }) });
+  const ok = await engine.run({ template: 'fixtures/templates/overspeed.json', inputs: { telemetry: 'fixtures/telemetry/window.csv' }, runId: 'golden-lib-' + FMT, progress: (m) => msgs.push(m.t) });
+  const failed = await engine.run({ template: 'fixtures/templates/overspeed.json', inputs: { telemetry: 'missing.csv' }, runId: 'golden-lib-fail-' + FMT });
+  let usage = null;
+  try { await engine.run({ template: 'fixtures/templates/overspeed.json', inputs: {} }); } catch (e) { usage = { isUsage: e instanceof XweUsageError, exitCode: e.exitCode, message: e.message }; }
+  console.log(JSON.stringify({
+    status: ok.result.status, events: ok.result.events.length, occurredAt: ok.result.events[0]?.occurredAt, runDir: ok.runDir, outcomeSteps: ok.outcome.steps.length, msgs,
+    failedStatus: failed.result.status, failedNode: failed.result.failedNodeId, failedRunDir: failed.runDir, usage,
+  }));
+`;
+for (const [fmt, argv, imports] of [
+  ['esm', ['--input-type=module', '-e'], `const FMT = 'esm';
+   import { createEngine, XweUsageError } from ${JSON.stringify(join(root, 'dist/esm/index.js'))};
+   import { localHost } from ${JSON.stringify(join(root, 'dist/esm/local/index.js'))};`],
+  ['cjs', ['-e'], `const FMT = 'cjs';
+   const { createEngine, XweUsageError } = require(${JSON.stringify(join(root, 'dist/cjs/index.js'))});
+   const { localHost } = require(${JSON.stringify(join(root, 'dist/cjs/local/index.js'))});
+   (async () => {`],
+]) {
+  const body = fmt === 'cjs' ? `${LIB_BODY(imports)}\n})().catch((e) => { console.error(e); process.exit(9); });` : LIB_BODY(imports);
+  const res = spawnSync(process.execPath, [...argv, body], { cwd: root, encoding: 'utf8' });
+  let out = null;
+  try { out = JSON.parse(res.stdout.trim().split('\n').at(-1)); } catch { /* reported below */ }
+  check(`library (${fmt}) script runs`, res.status === 0 && out !== null, res.stderr.trim().split('\n').at(-1) ?? '');
+  check(`library (${fmt}): run resolves { result, runDir, outcome } with the overspeed event`,
+    out?.status === 'succeeded' && out?.events === 1 && out?.occurredAt === '2026-08-12T23:56:01.289Z' && out?.outcomeSteps === 4 && out?.runDir === join(outRoot, 'golden-lib-' + fmt));
+  check(`library (${fmt}): progress callback saw status/step/event messages`,
+    Array.isArray(out?.msgs) && out.msgs[0] === 'status' && out.msgs.at(-1) === 'status' && out.msgs.includes('step') && out.msgs.includes('event'), String(out?.msgs));
+  check(`library (${fmt}): a failed run resolves with result.json written`,
+    out?.failedStatus === 'failed' && out?.failedNode === 'n1' && existsSync(join(outRoot, 'golden-lib-fail-' + fmt, 'result.json')));
+  check(`library (${fmt}): a usage error rejects with XweUsageError exitCode 2`,
+    out?.usage?.isUsage === true && out?.usage?.exitCode === 2, out?.usage?.message);
+}
+
+// --- doctor -------------------------------------------------------------------
+{
+  const res = xwe(['doctor']);
+  const lines = res.stdout.trim().split('\n');
+  check('doctor exits 0 on this machine', res.status === 0, res.stdout.trim());
+  check('doctor header names the package version, node, platform', /^xwe \S+ \(node \d+\.\d+\.\d+, \w+ \w+\)$/.test(lines[0] ?? ''), lines[0]);
+  check('doctor lists ffmpeg, onnxruntime-node, vlm providers, models, registry, catalog in order',
+    ['ffmpeg', 'onnxruntime-node', 'vlm providers', 'models', 'registry', 'catalog'].every((label, i, all) => {
+      const idx = lines.findIndex((l) => l.startsWith(`  ${label.padEnd(18)}`));
+      const prev = i === 0 ? 0 : lines.findIndex((l) => l.startsWith(`  ${all[i - 1].padEnd(18)}`));
+      return idx > 0 && idx > prev;
+    }), lines.slice(1).join(' | '));
+  check('doctor catalog line carries the frozen core hash', lines.some((l) => l === '  catalog           26 nodes, core e481243f5ffe4678, no packs'));
+  check('doctor registry line is "not configured" until the registry ships', lines.some((l) => l === '  registry          not configured'));
 }
 
 if (!failed) rmSync(outRoot, { recursive: true, force: true });
