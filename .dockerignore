@@ -1,0 +1,9 @@
+node_modules
+dist
+out
+fixtures
+registry-mirror
+examples
+tools
+.git
+*.log

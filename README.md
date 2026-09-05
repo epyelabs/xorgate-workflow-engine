@@ -91,6 +91,12 @@ npx xwe run fixtures/templates/perimeter-person-detect.json \
 - `--emit-video` muxes each visualization node's annotated frames into
   `out/<runId>/video/<nodeId>.mp4` (h264, fps from the feeding decode_sample's
   config). Runner-level only — no catalog node, no cloud impact.
+- `--pack <module>` (repeatable, also on `validate`) registers a node pack
+  before the run: a package name or a path resolved from the working
+  directory, whose `pack` or default export is `{ name, version, nodes }`.
+  `examples/packs/acme-scale/` is a complete one; the library takes the same
+  packs through `createEngine({ packs })` or a `createCatalog([...corePacks,
+  ...])` catalog.
 - Exit codes: 0 success, 1 run failed (failing node named on stderr), 2 usage.
 - `xwe doctor` prints node, ffmpeg, the ONNX Runtime binding, the VLM client,
   the model roots and their contents, the registry and the catalog hash; exits
@@ -110,7 +116,17 @@ docker run --rm -v "$PWD":/work xwe \
 ```
 
 The image apt-installs ffmpeg and sets the entrypoint to the CLI; mount your
-workspace (templates, inputs, `fixtures/models`, output dir) at `/work`.
+workspace (templates, inputs, `fixtures/models`, output dir) at `/work`. The
+runtime stage keeps only the image's own ONNX Runtime binding (linux/<arch>),
+which is what takes the image from 1.31 GB to 940 MB on arm64. To run the
+golden suite inside the image, mount the checkout and shadow the host's
+`node_modules` with a Linux install in a named volume:
+
+```
+npm run fixtures:pull
+docker run --rm -v "$PWD":/work -v xwe-test-modules:/work/node_modules \
+    --entrypoint sh xwe -c 'npm ci --include=dev && npm test'
+```
 
 Per host:
 
