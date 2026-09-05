@@ -66,7 +66,9 @@ export const NODE_GROUPS = [
   'model',
   'logic',
   'output',
-  'custom',
+  // Reserved for the user-code nodes (function.javascript, function.python);
+  // empty until they ship. Renamed from `custom` in distribution M4.
+  'function',
 ] as const;
 export type NodeGroup = (typeof NODE_GROUPS)[number];
 
@@ -78,8 +80,25 @@ export const nodeConstraintSchema = z.object({
 });
 export type NodeConstraint = z.infer<typeof nodeConstraintSchema>;
 
+// A live zod schema, recognized by shape rather than by `instanceof`: a node
+// pack loaded into a CommonJS process from an ES module (or the reverse)
+// carries the other build of zod, whose classes are distinct objects. Every
+// consumer of `def.config` only ever calls `safeParse`/`parse` or walks `_def`
+// (zod-to-json-schema), so the shape is the contract.
+function isZodSchema(v: unknown): v is z.ZodTypeAny {
+  if (v instanceof z.ZodType) return true;
+  const candidate = v as { safeParse?: unknown; parse?: unknown; _def?: unknown } | null;
+  return (
+    typeof candidate === 'object' &&
+    candidate !== null &&
+    typeof candidate.safeParse === 'function' &&
+    typeof candidate.parse === 'function' &&
+    typeof candidate._def === 'object'
+  );
+}
+
 // Declarative fields, zod-validated at registry build time. `config` is a live
-// zod schema and is validated structurally (instanceof) rather than by shape.
+// zod schema and is validated structurally (see isZodSchema) rather than by shape.
 export const nodeTypeDefSchema = z.object({
   type: z.string().regex(/^[a-z0-9_]+\.[a-z0-9_]+$/, 'namespaced lowercase type id'),
   version: z.number().int().positive(),
@@ -88,11 +107,12 @@ export const nodeTypeDefSchema = z.object({
   description: z.string().min(1),
   ui: z.object({
     icon: z.string().min(1), // lucide icon name (kebab-case)
-    editor: z.enum(['prompt', 'geofence', 'expression']).optional(),
+    // `code` is the function-node editor (distribution M7); additive.
+    editor: z.enum(['prompt', 'geofence', 'expression', 'code']).optional(),
   }),
   inputs: z.array(portDefSchema),
   outputs: z.array(portDefSchema),
-  config: z.custom<z.ZodTypeAny>((v) => v instanceof z.ZodType, 'config must be a zod schema'),
+  config: z.custom<z.ZodTypeAny>(isZodSchema, 'config must be a zod schema'),
   requires: z.array(capabilityRuleSchema),
   runtime: z.object({
     target: z.enum(['any', 'media']), // "media" forces the Fargate engine

@@ -3,7 +3,8 @@ import { createReadStream, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 import { once } from 'node:events';
 import type { WorkflowDefinition } from '../schemas/workflows';
-import { getNodeType } from '../catalog/index';
+import { coreCatalog } from '../catalog/index';
+import type { Catalog } from '../catalog/pack';
 import { ffmpegPath } from '../engine/media';
 
 /**
@@ -26,7 +27,7 @@ export interface EmittedVideo {
 }
 
 /** visualization nodeId -> fps of the decode_sample feeding its frames input. */
-export function visualizationFps(definition: WorkflowDefinition): Record<string, number> {
+export function visualizationFps(definition: WorkflowDefinition, catalog: Catalog = coreCatalog): Record<string, number> {
   const nodesById = new Map(definition.nodes.map((n) => [n.id, n]));
   const out: Record<string, number> = {};
   for (const node of definition.nodes) {
@@ -45,7 +46,7 @@ export function visualizationFps(definition: WorkflowDefinition): Record<string,
       const upstream = nodesById.get(inEdge.source);
       if (!upstream) break;
       if (upstream.type === 'video.decode_sample') {
-        const def = getNodeType(upstream.type);
+        const def = catalog.getNodeType(upstream.type);
         const parsed = def?.config.safeParse(upstream.data.config ?? {});
         if (parsed?.success) fps = (parsed.data as { fps: number }).fps;
         break;
@@ -92,13 +93,15 @@ export async function emitVisualizationVideos(args: {
   runDir: string;
   definition: WorkflowDefinition;
   log: (msg: string) => void;
+  /** The catalog the run used (default: core); decode_sample's fps comes from its def. */
+  catalog?: Catalog;
 }): Promise<EmittedVideo[]> {
   const framesRoot = path.join(args.runDir, 'frames');
   if (!existsSync(framesRoot)) {
     args.log('--emit-video: no frames/ directory on this run (no visualization node emitted frames)');
     return [];
   }
-  const fpsByNode = visualizationFps(args.definition);
+  const fpsByNode = visualizationFps(args.definition, args.catalog ?? coreCatalog);
   const emitted: EmittedVideo[] = [];
   for (const entry of readdirSync(framesRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;

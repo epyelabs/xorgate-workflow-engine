@@ -112,6 +112,21 @@ check(
   check('cjs local exports the model chain, registry client and checkModelDir', ['createModelChain', 'dirResolver', 'cacheResolver', 'httpResolver', 'pullModel', 'fetchRegistryIndex', 'checkModelDir', 'parseModelSpec'].every((n) => typeof cjsLocal[n] === 'function'));
 }
 
+// 4c. Node packs (M4): the payload's additive `packs[]`, the seven core packs,
+// the `function` group, the `code` editor and the open `family`.
+{
+  check('root exports createCatalog, corePacks, coreCatalog, CORE_NAMESPACES and the executor helpers', typeof cjsRoot.createCatalog === 'function' && Array.isArray(cjsRoot.corePacks) && typeof cjsRoot.coreCatalog?.getNodeType === 'function' && Array.isArray(cjsRoot.CORE_NAMESPACES) && ['requireInput', 'inputsForPort', 'telemetrySamples', 'mergeByTs', 'resolveSignal'].every((n) => typeof cjsRoot[n] === 'function'));
+  check('corePacks are seven packs totalling 26 nodes', cjsRoot.corePacks.length === 7 && cjsRoot.corePacks.reduce((n, p) => n + p.nodes.length, 0) === 26, cjsRoot.corePacks.map((p) => `${p.name}:${p.nodes.length}`).join(' '));
+  check('payload.packs is one core entry whose hash is catalogVersion (no packs registered)', Array.isArray(payload.packs) && payload.packs.length === 1 && payload.packs[0].name === 'core' && payload.packs[0].hash === payload.catalogVersion && payload.packs[0].version === JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version, JSON.stringify(payload.packs));
+  check('catalogVersion is the frozen core hash e481243f5ffe4678', payload.catalogVersion === 'e481243f5ffe4678', payload.catalogVersion);
+  check('NODE_GROUPS names `function` (not `custom`) as the seventh group', cjsRoot.NODE_GROUPS.length === 7 && cjsRoot.NODE_GROUPS[6] === 'function' && !cjsRoot.NODE_GROUPS.includes('custom'), cjsRoot.NODE_GROUPS.join(','));
+  check('CORE_NAMESPACES are the seven core namespaces plus function', cjsRoot.CORE_NAMESPACES.join(',') === 'source,video,telemetry,model,logic,output,connector,function', cjsRoot.CORE_NAMESPACES.join(','));
+  const sample = cjsRoot.getNodeType('telemetry.ema');
+  check('nodeTypeDefSchema accepts ui.editor "code" (additive) and rejects an unknown editor', cjsRoot.nodeTypeDefSchema.safeParse({ ...sample, ui: { ...sample.ui, editor: 'code' } }).success && !cjsRoot.nodeTypeDefSchema.safeParse({ ...sample, ui: { ...sample.ui, editor: 'nope' } }).success);
+  const base = JSON.parse(readFileSync(join(root, 'fixtures/models/detection/yolov8n/1/manifest.json'), 'utf8'));
+  check('model manifest `family` is an open string (a pack family parses; empty is refused); MODEL_FAMILIES keeps the three documented values', cjsRoot.modelManifestSchema.safeParse({ ...base, family: 'classification' }).success && !cjsRoot.modelManifestSchema.safeParse({ ...base, family: '' }).success && cjsRoot.MODEL_FAMILIES.join(',') === 'detection,depth,segmentation');
+}
+
 // 5. No cloud-provider packages anywhere: package.json, lockfile, and the src/ tree.
 const AWS_RE = /@aws-sdk|aws-lambda/;
 for (const f of ['package.json', 'package-lock.json']) {

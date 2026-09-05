@@ -3,7 +3,8 @@ import type { WorkflowDefinition } from '../schemas/workflows';
 import { workflowDefinitionSchema } from '../schemas/workflows';
 import { upgradeDefinition } from '../compat';
 import { validateDefinitionForPublish, type ValidationIssue } from '../validate';
-import { getNodeType, capabilityTokensForNode } from '../catalog/index';
+import { capabilityTokensForNode, coreCatalog } from '../catalog/index';
+import type { Catalog } from '../catalog/pack';
 import { runManifestSchema, runPrefix, type RunManifest } from '../engine/manifest';
 import type { EngineSourceBinding } from '../catalog/types';
 
@@ -54,13 +55,13 @@ const INPUT_KEY_BY_TYPE: Record<string, string> = {
   'source.telemetry': 'telemetry',
 };
 
-export function inspectTemplate(definition: WorkflowDefinition): TemplateInfo {
-  const { issues } = validateDefinitionForPublish(definition);
+export function inspectTemplate(definition: WorkflowDefinition, catalog: Catalog = coreCatalog): TemplateInfo {
+  const { issues } = validateDefinitionForPublish(definition, catalog);
   const sources: TemplateInfo['sources'] = [];
   const requires = new Set<string>();
   const shorthandCounts = new Map<string, number>();
   for (const node of definition.nodes) {
-    const def = getNodeType(node.type);
+    const def = catalog.getNodeType(node.type);
     if (!def) continue;
     for (const token of capabilityTokensForNode(def, node.data.config ?? {})) requires.add(token);
     // Bindable sources are the true feed nodes: source-group with no input
@@ -97,10 +98,12 @@ export interface BuildManifestArgs {
   inputs: Record<string, string>;
   runId: string;
   window?: { from: string; to: string } | null;
+  /** The catalog to validate against (default: the core catalog). */
+  catalog?: Catalog;
 }
 
 export function buildLocalManifest(args: BuildManifestArgs): RunManifest {
-  const info = inspectTemplate(args.definition);
+  const info = inspectTemplate(args.definition, args.catalog ?? coreCatalog);
   if (info.issues.length > 0) {
     const first = info.issues[0];
     throw new Error(

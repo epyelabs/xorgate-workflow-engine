@@ -22,15 +22,17 @@ let cached: NodeJS.Require | undefined;
 
 function moduleRequire(): NodeJS.Require {
   if (cached) return cached;
-  if (typeof require === 'function') {
+  if (ESM_MODULE_URL.startsWith('file:')) {
+    // The finalized ESM build: resolve from this file's own location. Checked
+    // first because a global `require` can exist around an ES module too
+    // (`node -e`, the REPL, some bundlers) and it resolves from the wrong place.
+    cached = createRequire(ESM_MODULE_URL);
+  } else if (typeof require === 'function') {
     cached = require;
   } else {
-    if (!ESM_MODULE_URL.startsWith('file:')) {
-      throw new Error(
-        'lazyRequire: this ESM build was not finalized (run `npm run build`, which applies scripts/finalize-build.mjs)',
-      );
-    }
-    cached = createRequire(ESM_MODULE_URL);
+    throw new Error(
+      'lazyRequire: this ESM build was not finalized (run `npm run build`, which applies scripts/finalize-build.mjs)',
+    );
   }
   return cached;
 }

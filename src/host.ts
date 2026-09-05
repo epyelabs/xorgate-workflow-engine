@@ -5,6 +5,7 @@ import type {
   EngineSourceBinding,
   EngineSourceReader,
 } from './catalog/types';
+import type { Catalog } from './catalog/pack';
 import type { EngineRunOutcome } from './engine/index';
 import type { EngineResult, RunManifest } from './engine/manifest';
 
@@ -24,6 +25,8 @@ export interface EngineHostBindArgs {
   bindings: Record<string, EngineSourceBinding>;
   /** `engine.run({ emitVideo })`; the local host muxes frames in afterSuccess. */
   emitVideo: boolean;
+  /** The catalog the run executes against (core plus any packs); absent means core. */
+  catalog?: Catalog;
 }
 
 export interface EngineBoundRun {

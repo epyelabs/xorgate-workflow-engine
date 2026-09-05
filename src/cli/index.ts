@@ -2,20 +2,23 @@
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { parseArgs } from 'node:util';
+import { coreCatalog, corePacks } from '../catalog/index';
+import { createCatalog, type NodePack } from '../catalog/pack';
 import { createEngine, XweUsageError, type EngineRunOptions } from '../create-engine';
 import { inspectTemplate, loadDefinition } from '../local/manifest-builder';
 import { localHost } from '../local/host';
 import { ndjsonProgress, resolveFfmpeg } from '../local/target';
 import { doctorReport } from './doctor';
 import { ModelsUsageError, runModelsCommand } from './models';
+import { loadPacks } from './packs';
 
 /**
  * xwe — the workflow engine CLI: argument parsing over createEngine + localHost.
  *
- *   xwe validate <template.json>
+ *   xwe validate <template.json> [--pack module]...
  *   xwe run <template.json> --input video=./drive.mp4 --input telemetry=./window.csv
  *           [--out ./out] [--run-id id] [--models-dir dir]... [--secrets s.json]
- *           [--progress json] [--emit-video] [--window from,to]
+ *           [--progress json] [--emit-video] [--window from,to] [--pack module]...
  *   xwe run --manifest <manifest.json> [same flags]
  *   xwe models list | pull <family>/<name>[@v] | path <family>/<name>[@v] | check <dir>
  *   xwe doctor [--models-dir dir]...
@@ -24,7 +27,7 @@ import { ModelsUsageError, runModelsCommand } from './models';
  */
 
 const USAGE = `usage:
-  xwe validate <template.json>
+  xwe validate <template.json> [--pack <module>]...
   xwe run <template.json> --input <key>=<path> ... [options]
   xwe run --manifest <manifest.json> [options]
   xwe models list | pull <family>/<name>[@<version>] | path <family>/<name>[@<version>] | check <dir>
@@ -39,16 +42,18 @@ options:
   --secrets <file>       JSON { "<logical-name>": "<value>" }; env XORGATE_SECRET_* also works
   --progress json        emit NDJSON progress on stdout
   --emit-video           mux visualization frames into out/<runId>/video/<nodeId>.mp4
-  --window <from>,<to>   ISO run window (rarely needed locally)`;
+  --window <from>,<to>   ISO run window (rarely needed locally)
+  --pack <module>        register a node pack (an npm package name or a path, resolved from cwd); repeatable`;
 
 function fail(message: string, code = 2): never {
   console.error(`xwe: ${message}`);
   process.exit(code);
 }
 
-function cmdValidate(templatePath: string): number {
+function cmdValidate(templatePath: string, packs: NodePack[]): number {
   const definition = loadDefinition(templatePath);
-  const info = inspectTemplate(definition);
+  const catalog = packs.length > 0 ? createCatalog([...corePacks, ...packs]) : coreCatalog;
+  const info = inspectTemplate(definition, catalog);
   if (info.issues.length > 0) {
     console.error(`INVALID: ${info.issues.length} issue(s)`);
     for (const issue of info.issues) {
@@ -87,10 +92,12 @@ interface RunFlags {
   emitVideo?: boolean;
   window?: string;
   pull?: boolean;
+  pack: string[];
 }
 
 async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promise<number> {
   const runOptions: EngineRunOptions = {};
+  const packs = await loadPacks(flags.pack, { log: (line) => console.error(line) });
   if (flags.manifest) {
     runOptions.manifest = flags.manifest;
   } else if (templatePath) {
@@ -118,6 +125,7 @@ async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promis
     : undefined;
 
   const engine = createEngine({
+    ...(packs.length > 0 ? { packs } : {}),
     host: localHost({
       modelDirs: flags.modelsDir,
       outDir: flags.out,
@@ -161,9 +169,15 @@ async function cmdDoctor(modelDirs: string[]): Promise<number> {
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
   if (command === 'validate') {
-    const templatePath = rest[0];
+    const { values, positionals } = parseArgs({
+      args: rest,
+      allowPositionals: true,
+      options: { pack: { type: 'string', multiple: true } },
+    });
+    const templatePath = positionals[0];
     if (!templatePath) fail(`validate needs a template path\n${USAGE}`);
-    return cmdValidate(templatePath);
+    const packs = await loadPacks(values.pack ?? [], { log: (line) => console.error(line) });
+    return cmdValidate(templatePath, packs);
   }
   if (command === 'run') {
     const { values, positionals } = parseArgs({
@@ -180,6 +194,7 @@ async function main(): Promise<number> {
         'emit-video': { type: 'boolean' },
         window: { type: 'string' },
         pull: { type: 'boolean' },
+        pack: { type: 'string', multiple: true },
       },
     });
     return cmdRun(positionals[0], {
@@ -193,6 +208,7 @@ async function main(): Promise<number> {
       emitVideo: values['emit-video'],
       window: values.window,
       pull: values.pull,
+      pack: values.pack ?? [],
     });
   }
   if (command === 'models') {

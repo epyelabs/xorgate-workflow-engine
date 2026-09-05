@@ -5,7 +5,7 @@
 // `xwe doctor`. Run `npm run build` first (`npm test` does).
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, existsSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, existsSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, dirname, extname } from 'node:path';
@@ -385,6 +385,123 @@ function serveDir(dir) {
   let out = null;
   try { out = JSON.parse(lib.stdout.trim().split('\n').at(-1)); } catch { /* below */ }
   check('checkModelDir (esm) returns { ok, problems } for the acme-test directory', out?.ok === true && Array.isArray(out.problems) && out.problems.length === 0 && out.stages.join(',') === 'manifest,model,session,output' && out.name === 'acme-test', lib.stderr.trim().split('\n').at(-1) || JSON.stringify(out));
+}
+
+// --- node packs: the example pack through --pack, the library and the payload --
+// examples/packs/acme-scale is the `acme.scale` node from extending.mdx; the
+// scaled overspeed graph multiplies the derived speed by 0.05, so the
+// threshold that fires once on the plain overspeed graph never fires.
+{
+  const PACK = ['--pack', './examples/packs/acme-scale'];
+  const scaled = 'examples/packs/acme-scale/overspeed-scaled.json';
+  const packLine = '[xwe] pack @acme/xwe-nodes-scale v1.0.0 (1 node) <- ./examples/packs/acme-scale/index.js';
+  const pkgVersion = readJson(join(root, 'package.json')).version;
+
+  let res = xwe(['validate', 'fixtures/templates/overspeed.json', ...PACK]);
+  check('validate --pack ./examples/packs/acme-scale exits 0 on a core-only template', res.status === 0 && res.stdout.startsWith('OK: 4 nodes, 3 edges'), res.stdout.trim() || res.stderr.trim());
+  check('the pack line names the pack, version, node count and the resolved file', res.stderr.trim() === packLine, res.stderr.trim());
+  res = xwe(['validate', scaled, ...PACK]);
+  check('validate --pack accepts the template that uses acme.scale', res.status === 0 && res.stdout.startsWith('OK: 5 nodes, 4 edges') && res.stdout.includes('--input telemetry='), res.stdout.trim() || res.stderr.trim());
+  res = xwe(['validate', scaled]);
+  check('validate without the pack exits 1 naming the unknown type and its namespace', res.status === 1 && res.stderr.includes('UNKNOWN_NODE_TYPE [n2b]: Unknown node type "acme.scale": namespace "acme" is not in the core catalog; register its pack (--pack <module>, or createEngine({ packs }))'), res.stderr.trim().split('\n')[1]);
+  res = xwe(['validate', scaled, '--pack', './does-not-exist']);
+  check('--pack of a module that does not resolve exits 2', res.status === 2 && res.stderr.startsWith('xwe: --pack ./does-not-exist: cannot resolve it from'), res.stderr.trim());
+  res = xwe(['validate', scaled, ...PACK, ...PACK]);
+  check('the same pack twice exits 2 naming the pack', res.status === 2 && res.stderr.includes('pack "@acme/xwe-nodes-scale" is registered twice'), res.stderr.trim().split('\n').at(-1));
+
+  // A second pack as a CommonJS file next to the workspace (`--pack ./local-pack.cjs`).
+  const localPack = join(outRoot, 'local-pack.cjs');
+  writeFileSync(localPack, `
+    const { defineNode, requireInput, telemetrySamples } = require(${JSON.stringify(join(root, 'dist/cjs/index.js'))});
+    const { z } = require(${JSON.stringify(join(root, 'node_modules/zod'))});
+    const def = defineNode({ type: 'acme.passthrough', version: 1, group: 'telemetry', label: 'Passthrough', description: 'Forwards telemetry unchanged.', ui: { icon: 'arrow-right' },
+      inputs: [{ id: 'telemetry', label: 'Telemetry', channel: 'telemetry', cardinality: 'one', required: true }],
+      outputs: [{ id: 'telemetry', label: 'Telemetry', channel: 'telemetry', cardinality: 'many', required: false }],
+      config: z.object({}), requires: [], runtime: { target: 'any' } });
+    async function* executor(inputs, config, ctx) { let n = 0; for await (const s of telemetrySamples(requireInput(inputs, 'telemetry'))) { n++; yield { ch: 'telemetry', ts: s.ts, payload: { signals: s.signals } }; } ctx.setSummary('forwarded ' + n + ' samples'); }
+    module.exports = { name: 'local-pack', version: '0.0.1', nodes: [{ def, executor }] };
+  `);
+  res = xwe(['validate', scaled, ...PACK, '--pack', localPack]);
+  check('two packs load in order (an ES module directory and a CommonJS file)', res.status === 0 && res.stderr.trim().split('\n')[0] === packLine && res.stderr.includes(`[xwe] pack local-pack v0.0.1 (1 node) <- ${realpathSync(localPack)}`), res.stderr.trim());
+  writeFileSync(join(outRoot, 'core-ns-pack.cjs'), `module.exports = { name: 'bad', version: '1', nodes: [{ def: { ...require(${JSON.stringify(localPack)}).nodes[0].def, type: 'telemetry.passthrough' }, executor: async function* () {} }] };`);
+  res = xwe(['validate', scaled, '--pack', join(outRoot, 'core-ns-pack.cjs')]);
+  check('a pack node in a core namespace exits 2 naming the node and the namespace', res.status === 2 && res.stderr.includes('Pack "bad": node type "telemetry.passthrough" uses the core namespace "telemetry"'), res.stderr.trim().split('\n').at(-1));
+  writeFileSync(join(outRoot, 'no-pack.cjs'), 'module.exports = { hello: 1 };');
+  res = xwe(['validate', scaled, '--pack', join(outRoot, 'no-pack.cjs')]);
+  check('a module that exports no pack exits 2 saying what a pack export looks like', res.status === 2 && res.stderr.includes('exports no pack (export `pack`, or a default export, shaped { name, version, nodes })'), res.stderr.trim());
+
+  // run: the scaled signal flips the threshold outcome.
+  res = xwe(['run', scaled, ...PACK, '--input', 'telemetry=fixtures/telemetry/window.csv', '--out', outRoot, '--run-id', 'golden-pack']);
+  check('run --pack over the scaled overspeed graph exits 0', res.status === 0 && res.stderr.trim().split('\n')[0] === packLine, res.stderr.trim().split('\n').at(-1));
+  const packResult = readJson(join(outRoot, 'golden-pack', 'result.json'));
+  const scaleStep = packResult.steps.find((s) => s.nodeId === 'n2b');
+  check('acme.scale ran as step n2b with its documented summary', scaleStep?.status === 'ok' && scaleStep.output === 'scaled 150 samples (speed_kph × 0.05)', scaleStep?.output);
+  const gate = packResult.steps.find((s) => s.nodeId === 'n3');
+  check('the scaled signal flips the threshold: true on 0/149 and 0 events (149/149 and 1 event unscaled)', packResult.status === 'succeeded' && /^true on 0\/149 samples/.test(gate?.output ?? '') && packResult.events.length === 0, `${gate?.output} | events: ${packResult.events.length}`);
+  res = xwe(['run', scaled, '--input', 'telemetry=fixtures/telemetry/window.csv', '--out', outRoot, '--run-id', 'golden-pack-missing']);
+  check('run without the pack is a usage error (exit 2) that runs nothing', res.status === 2 && res.stderr.includes('UNKNOWN_NODE_TYPE at n2b: Unknown node type "acme.scale"') && !existsSync(join(outRoot, 'golden-pack-missing')), res.stderr.trim());
+
+  // The library: createCatalog, the payload's packs[], createEngine({ packs | catalog }), the rules.
+  const PACK_LIB = (imports) => `
+    ${imports}
+    const catalog = createCatalog([...corePacks, pack]);
+    const core = buildCatalogPayload();
+    const withPack = buildCatalogPayload(catalog);
+    const tpl = JSON.parse(readFileSync(${JSON.stringify(join(root, scaled))}, 'utf8'));
+    const engine = createEngine({ host: localHost({ outDir: ${JSON.stringify(outRoot)}, baseDir: ${JSON.stringify(root)} }), packs: [pack] });
+    const run = await engine.run({ template: tpl, inputs: { telemetry: 'fixtures/telemetry/window.csv' }, runId: 'golden-pack-lib-' + FMT });
+    const viaCatalog = await createEngine({ host: localHost({ outDir: ${JSON.stringify(outRoot)}, baseDir: ${JSON.stringify(root)} }), catalog }).run({ template: tpl, inputs: { telemetry: 'fixtures/telemetry/window.csv' }, runId: 'golden-pack-lib-catalog-' + FMT });
+    const errors = {};
+    try { createEngine({ host: localHost(), catalog, packs: [pack] }); } catch (e) { errors.both = e instanceof XweUsageError && e.message; }
+    try { createCatalog([...corePacks, { name: 'x', version: '1', nodes: [{ def: { ...pack.nodes[0].def, type: 'model.scale' }, executor: pack.nodes[0].executor }] }]); } catch (e) { errors.namespace = e.message; }
+    try { createCatalog([...corePacks, pack, { name: 'y', version: '1', nodes: pack.nodes }]); } catch (e) { errors.duplicate = e.message; }
+    try { createCatalog([{ name: 'z', version: '1', nodes: [{ def: { ...pack.nodes[0].def, type: 'acme.untagged', outputs: [{ id: 'o', label: 'O', channel: 'json', cardinality: 'many', required: false }] }, executor: pack.nodes[0].executor }] }]); } catch (e) { errors.tag = e.message; }
+    const minusModel = createCatalog(corePacks.filter((p) => p.name !== 'core/model'));
+    console.log(JSON.stringify({
+      coreVersion: core.catalogVersion, corePacks: core.packs, coreNodes: core.nodes.length,
+      packs: withPack.packs, version: withPack.catalogVersion, nodes: withPack.nodes.length, cached: buildCatalogPayload(catalog) === withPack,
+      corePackNames: corePacks.map((p) => p.name), enginePacks: engine.catalog.packs.length,
+      validateCore: validateDefinition(tpl).issues.map((i) => i.code), validatePack: validateDefinition(tpl, catalog).ok, inspectKey: inspectTemplate(tpl, catalog).inputs[0].key,
+      run: { status: run.result.status, events: run.result.events.length, scale: run.result.steps.find((s) => s.nodeId === 'n2b')?.output, gate: run.result.steps.find((s) => s.nodeId === 'n3')?.output },
+      viaCatalog: viaCatalog.result.status, errors,
+      minusModel: { nodes: minusModel.listNodeTypes().length, packs: minusModel.payload().packs, hasDetection: minusModel.getNodeType('model.object_detection') !== undefined },
+    }));
+  `;
+  for (const [fmt, argv, imports] of [
+    ['esm', ['--input-type=module', '-e'], `const FMT = 'esm';
+     import { readFileSync } from 'node:fs';
+     import { createEngine, createCatalog, corePacks, buildCatalogPayload, validateDefinition, inspectTemplate, XweUsageError } from ${JSON.stringify(join(root, 'dist/esm/index.js'))};
+     import { localHost } from ${JSON.stringify(join(root, 'dist/esm/local/index.js'))};
+     import { pack } from ${JSON.stringify(join(root, 'examples/packs/acme-scale/index.js'))};`],
+    ['cjs', ['-e'], `const FMT = 'cjs';
+     const { readFileSync } = require('node:fs');
+     const { createEngine, createCatalog, corePacks, buildCatalogPayload, validateDefinition, inspectTemplate, XweUsageError } = require(${JSON.stringify(join(root, 'dist/cjs/index.js'))});
+     const { localHost } = require(${JSON.stringify(join(root, 'dist/cjs/local/index.js'))});
+     const { pack } = require(${JSON.stringify(join(root, 'examples/packs/acme-scale/index.js'))});
+     (async () => {`],
+  ]) {
+    const body = fmt === 'cjs' ? `${PACK_LIB(imports)}\n})().catch((e) => { console.error(e); process.exit(9); });` : PACK_LIB(imports);
+    const lib = spawnSync(process.execPath, [...argv, body], { cwd: root, encoding: 'utf8' });
+    let out = null;
+    try { out = JSON.parse(lib.stdout.trim().split('\n').at(-1)); } catch { /* reported below */ }
+    check(`packs (${fmt}) library script runs`, lib.status === 0 && out !== null, lib.stderr.trim().split('\n').slice(-3).join(' | '));
+    check(`packs (${fmt}): the core payload is unchanged: e481243f5ffe4678, 26 nodes, one core pack entry with that hash`,
+      out?.coreVersion === 'e481243f5ffe4678' && out?.coreNodes === 26 && JSON.stringify(out?.corePacks) === JSON.stringify([{ name: 'core', version: pkgVersion, hash: 'e481243f5ffe4678' }]), JSON.stringify(out?.corePacks));
+    check(`packs (${fmt}): corePacks are the seven core namespaces in registry order`,
+      JSON.stringify(out?.corePackNames) === JSON.stringify(['core/source', 'core/connector', 'core/video', 'core/telemetry', 'core/model', 'core/logic', 'core/output']), String(out?.corePackNames));
+    check(`packs (${fmt}): with the pack, packs[] has two entries, the core hash is unchanged and catalogVersion differs`,
+      out?.packs?.length === 2 && out.packs[0].name === 'core' && out.packs[0].hash === 'e481243f5ffe4678' && out.packs[1].name === '@acme/xwe-nodes-scale' && out.packs[1].version === '1.0.0' && /^[0-9a-f]{16}$/.test(out.packs[1].hash) && out.version !== 'e481243f5ffe4678' && out.nodes === 27 && out.cached === true,
+      `${JSON.stringify(out?.packs)} catalogVersion=${out?.version}`);
+    check(`packs (${fmt}): validateDefinition reports the unknown type against core and passes against the pack catalog; inspectTemplate takes the catalog`,
+      out?.validateCore?.includes('UNKNOWN_NODE_TYPE') && out?.validatePack === true && out?.inspectKey === 'telemetry', JSON.stringify([out?.validateCore, out?.validatePack, out?.inspectKey]));
+    check(`packs (${fmt}): createEngine({ packs }) runs the scaled graph to 0 events; engine.catalog carries 8 packs`,
+      out?.run?.status === 'succeeded' && out.run.events === 0 && out.run.scale === 'scaled 150 samples (speed_kph × 0.05)' && /^true on 0\/149/.test(out.run.gate ?? '') && out?.enginePacks === 8, JSON.stringify(out?.run));
+    check(`packs (${fmt}): createEngine({ catalog }) runs it too`, out?.viaCatalog === 'succeeded', out?.viaCatalog);
+    check(`packs (${fmt}): catalog and packs together is a usage error; a core namespace, a duplicate type and an untagged json output throw naming the node`,
+      out?.errors?.both === 'createEngine takes a catalog or packs, not both' && out?.errors?.namespace?.includes('node type "model.scale" uses the core namespace "model"') && out?.errors?.duplicate?.includes('Duplicate catalog node type "acme.scale" (in pack "@acme/xwe-nodes-scale" and pack "y")') && out?.errors?.tag === 'json output "o" on "acme.untagged" must declare a tag', JSON.stringify(out?.errors));
+    check(`packs (${fmt}): core minus core/model composes 22 nodes with a different core hash and no detection node`,
+      out?.minusModel?.nodes === 22 && out.minusModel.hasDetection === false && out.minusModel.packs?.length === 1 && out.minusModel.packs[0].name === 'core' && out.minusModel.packs[0].hash !== 'e481243f5ffe4678', JSON.stringify(out?.minusModel));
+  }
 }
 
 if (!failed) rmSync(outRoot, { recursive: true, force: true });

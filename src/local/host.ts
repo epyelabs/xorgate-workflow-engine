@@ -100,7 +100,12 @@ export function localHost(opts: LocalHostOptions = {}): LocalHost {
         ...(args.emitVideo
           ? {
               afterSuccess: async () => {
-                await emitVisualizationVideos({ runDir, definition: args.manifest.definition, log });
+                await emitVisualizationVideos({
+                  runDir,
+                  definition: args.manifest.definition,
+                  log,
+                  ...(args.catalog ? { catalog: args.catalog } : {}),
+                });
               },
             }
           : {}),

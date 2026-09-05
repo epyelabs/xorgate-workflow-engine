@@ -69,14 +69,26 @@ export type {
   ValidateDefinitionResult,
 } from './template';
 export { upgradeDefinition, upgradeDefinitionSafe, DEFINITION_SCHEMA_VERSION, POC_TYPE_ALIASES } from './compat';
-export { validateDefinitionForPublish } from './validate';
+export { validateDefinitionForPublish, unknownNodeTypeMessage } from './validate';
 export type { ValidationIssue, ValidationResult } from './validate';
 
-// The catalog
-export { getNodeType, getExecutor, listNodeTypes, capabilityTokensForNode } from './catalog/index';
-export type { CatalogEntry } from './catalog/index';
-export { buildCatalogPayload } from './catalog/serialize';
-export type { SerializedNodeTypeDef, WorkflowCatalogPayload } from './catalog/serialize';
+// The catalog: the core registry, node packs and catalog instances
+export {
+  buildCatalogPayload,
+  capabilityTokensForNode,
+  coreCatalog,
+  corePacks,
+  getExecutor,
+  getNodeType,
+  listNodeTypes,
+} from './catalog/index';
+export { CORE_NAMESPACES, createCatalog, isCorePack } from './catalog/pack';
+export type { Catalog, CatalogEntry, NodePack, NodePackNode } from './catalog/pack';
+export type { CatalogPackInfo, SerializedNodeTypeDef, WorkflowCatalogPayload } from './catalog/serialize';
+
+// Executor helpers for nodes written outside this package (extending.mdx)
+export { inputsForPort, mergeByTs, requireInput, resolveSignal, telemetrySamples } from './engine/helpers';
+export type { MergedMessage } from './engine/helpers';
 
 // Schemas: the frozen contracts
 export { workflowDefinitionSchema, workflowEdgeSchema, workflowNodeSchema } from './schemas/workflows';

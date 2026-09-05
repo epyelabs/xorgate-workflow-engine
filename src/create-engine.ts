@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { coreCatalog, corePacks } from './catalog/index';
+import { createCatalog, type Catalog, type NodePack } from './catalog/pack';
 import type { EngineSecretReader, EngineSourceBinding } from './catalog/types';
 import { runGraph, type EngineRunOutcome } from './engine/index';
 import { runManifestSchema, type EngineResult, type RunManifest } from './engine/manifest';
@@ -30,10 +32,13 @@ export class XweUsageError extends Error {
 
 export interface CreateEngineOptions {
   host: EngineHost;
-  /** Reserved: a catalog instance from `createCatalog` (a later release). */
-  catalog?: undefined;
-  /** Reserved: node packs to register (a later release). */
-  packs?: undefined;
+  /**
+   * The catalog to run against, from `createCatalog([...corePacks, ...])`.
+   * Default: the core catalog. Exclusive with `packs`.
+   */
+  catalog?: Catalog;
+  /** Shorthand for `createCatalog([...corePacks, ...packs])`: the core plus these. */
+  packs?: ReadonlyArray<NodePack>;
   /** Engine diagnostics (`[engine] ...` on the CLI). Default: silent. */
   log?: (message: string) => void;
 }
@@ -70,6 +75,8 @@ export interface EngineRunResult {
 
 export interface Engine {
   readonly host: EngineHost;
+  /** The catalog every run of this engine validates and executes against. */
+  readonly catalog: Catalog;
   run(options: EngineRunOptions): Promise<EngineRunResult>;
 }
 
@@ -93,8 +100,8 @@ function readJsonFile(file: string, what: string): unknown {
   }
 }
 
-/** template | manifest -> a v2 run manifest; every failure is a usage error. */
-export function resolveRunManifest(options: EngineRunOptions): RunManifest {
+/** template | manifest -> a v2 run manifest; every failure is a usage error. `catalog` defaults to core. */
+export function resolveRunManifest(options: EngineRunOptions, catalog: Catalog = coreCatalog): RunManifest {
   if (options.template !== undefined && options.manifest !== undefined) {
     throw new XweUsageError('run takes a template or a manifest, not both');
   }
@@ -123,6 +130,7 @@ export function resolveRunManifest(options: EngineRunOptions): RunManifest {
         inputs: options.inputs ?? {},
         runId: options.runId ?? `local-${Date.now()}`,
         window: options.window ?? null,
+        catalog,
       });
     } catch (err) {
       return usage(err);
@@ -151,18 +159,27 @@ export function createEngine(options: CreateEngineOptions): Engine {
   if (!options || !options.host || typeof options.host.bind !== 'function') {
     throw new XweUsageError('createEngine needs a host: createEngine({ host: localHost({ ... }) })');
   }
-  if (options.catalog !== undefined || options.packs !== undefined) {
-    throw new XweUsageError(
-      'createEngine: custom catalogs and node packs are not available in this release; pass only { host, log }',
-    );
+  if (options.catalog !== undefined && options.packs !== undefined) {
+    throw new XweUsageError('createEngine takes a catalog or packs, not both');
   }
+  if (options.catalog !== undefined && typeof options.catalog.getNodeType !== 'function') {
+    throw new XweUsageError('createEngine: catalog must come from createCatalog([...corePacks, ...])');
+  }
+  if (options.packs !== undefined && !Array.isArray(options.packs)) {
+    throw new XweUsageError('createEngine: packs must be an array of node packs');
+  }
+  // createCatalog throws (naming the node) on a malformed pack; that is a
+  // programming error in the pack, not a usage error, so it propagates as is.
+  const catalog =
+    options.catalog ?? (options.packs ? createCatalog([...corePacks, ...options.packs]) : coreCatalog);
   const host = options.host;
   const log = options.log ?? (() => {});
 
   return {
     host,
+    catalog,
     async run(runOptions: EngineRunOptions): Promise<EngineRunResult> {
-      const manifest = resolveRunManifest(runOptions);
+      const manifest = resolveRunManifest(runOptions, catalog);
       const runId = runOptions.runId ?? manifest.runId;
       const formats = captureFormatsOf(manifest.definition);
       const rawBindings: Record<string, EngineSourceBinding> = Object.fromEntries(
@@ -173,6 +190,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
         manifest,
         bindings: rawBindings,
         emitVideo: runOptions.emitVideo === true,
+        catalog,
       });
       const progress = teeProgress(
         bound.progress,
@@ -205,6 +223,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
             ...(progress ? { progress } : {}),
             ...(deadlineMs ? { deadlineMs } : {}),
             log,
+            catalog,
           },
         );
       } catch (err) {

@@ -1,5 +1,6 @@
 import type { WorkflowDefinition } from './schemas/workflows';
-import { getNodeType } from './catalog/index';
+import { coreCatalog } from './catalog/index';
+import { isCoreNamespace, namespaceOf, type Catalog } from './catalog/pack';
 import type { NodeTypeDef, PortDef } from './catalog/types';
 import { channelLabel, channelsCompatible } from './catalog/types';
 import { DEFINITION_SCHEMA_VERSION, upgradeDefinition } from './compat';
@@ -9,7 +10,8 @@ import { DEFINITION_SCHEMA_VERSION, upgradeDefinition } from './compat';
  * (shape-valid only, schemas/workflows.ts); publish is strict: known types,
  * config parses, required ports connected, edges channel-valid, DAG, at least
  * one source and one output. Runs on the upgraded (v2) view of the definition;
- * the stored row is not rewritten.
+ * the stored row is not rewritten. `catalog` is the node registry to validate
+ * against (default: the core catalog; a host with packs passes its own).
  */
 
 export interface ValidationIssue {
@@ -62,7 +64,20 @@ export function resolvePort(
   return ports.length === 0 ? { error: 'UNKNOWN_PORT' } : { error: 'AMBIGUOUS_PORT' };
 }
 
-export function validateDefinitionForPublish(raw: WorkflowDefinition): ValidationResult {
+/** An unknown type outside the core namespaces looks like a pack's node; say so. */
+export function unknownNodeTypeMessage(type: string): string {
+  const namespace = namespaceOf(type);
+  if (!type.includes('.') || isCoreNamespace(namespace)) return `Unknown node type "${type}"`;
+  return (
+    `Unknown node type "${type}": namespace "${namespace}" is not in the core catalog; ` +
+    `register its pack (--pack <module>, or createEngine({ packs }))`
+  );
+}
+
+export function validateDefinitionForPublish(
+  raw: WorkflowDefinition,
+  catalog: Catalog = coreCatalog,
+): ValidationResult {
   const issues: ValidationIssue[] = [];
   const version = raw.schemaVersion ?? 1;
   if (version > DEFINITION_SCHEMA_VERSION) {
@@ -98,12 +113,12 @@ export function validateDefinitionForPublish(raw: WorkflowDefinition): Validatio
       continue;
     }
     nodeById.set(node.id, node);
-    const typeDef = getNodeType(node.type);
+    const typeDef = catalog.getNodeType(node.type);
     if (!typeDef) {
       issues.push({
         code: 'UNKNOWN_NODE_TYPE',
         nodeId: node.id,
-        message: `Unknown node type "${node.type}"`,
+        message: unknownNodeTypeMessage(node.type),
       });
       continue;
     }

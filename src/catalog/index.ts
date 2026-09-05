@@ -1,5 +1,7 @@
-import type { NodeExecutor, NodeTypeDef } from './types';
-import { nodeTypeDefSchema } from './types';
+import type { NodeTypeDef } from './types';
+import { createCatalog, markCorePack, type Catalog, type NodePack, type NodePackNode } from './pack';
+import type { WorkflowCatalogPayload } from './serialize';
+import { ownPackageVersion } from '../engine/lazy-require';
 
 import * as connectorThirdParty from './nodes/connector-third-party';
 import * as logicBoolean from './nodes/logic-boolean';
@@ -30,94 +32,71 @@ import * as videoScale from './nodes/video-scale';
 
 /**
  * The node catalog registry: the single source of truth for node types
- * (architecture.md §3). Defs are validated once at module load; a broken def
- * fails cold start loudly rather than serving a bad catalog.
+ * (architecture.md §3). The core nodes are seven packs, one per namespace,
+ * built into `coreCatalog` at module load; a broken def fails cold start
+ * loudly rather than serving a bad catalog. The module-level functions below
+ * are the core catalog's, for the callers that never compose packs; every
+ * engine entry point also takes a catalog instance (./pack `createCatalog`).
  */
 
-export interface CatalogEntry {
-  def: NodeTypeDef;
-  executor: NodeExecutor;
+export type { CatalogEntry } from './pack';
+
+const CORE_VERSION = ownPackageVersion();
+
+function corePack(namespace: string, nodes: NodePackNode[]): NodePack {
+  return markCorePack(Object.freeze({ name: `core/${namespace}`, version: CORE_VERSION, nodes: Object.freeze(nodes) }));
 }
 
-const MODULES: Array<{ def: NodeTypeDef; executor: NodeExecutor }> = [
-  sourceVideo,
-  sourceTelemetry,
-  connectorThirdParty,
-  videoDecodeSample,
-  videoScale,
-  telemetryKalman,
-  telemetryEma,
-  telemetryDerivative,
-  telemetryWindowAggregate,
-  telemetryResample,
-  telemetryTimeAlign,
-  telemetryOutlierRemoval,
-  telemetryGeofence,
-  modelObjectDetection,
-  modelSegmentation,
-  modelDepth,
-  modelVlm,
-  logicThreshold,
-  logicComparator,
-  logicBoolean,
-  logicDebounce,
-  logicDetectionGate,
-  logicProximityGate,
-  outputDataCapture,
-  outputEvent,
-  outputVisualization,
-];
+/**
+ * The seven core packs, one per core namespace, in the registry's historical
+ * order (so `listNodeTypes()` lists the 26 nodes as it always has). Compose a
+ * subset with `createCatalog` for a host that cannot run a group, for example
+ * every pack but `core/model` on a target without ONNX Runtime.
+ */
+export const corePacks: ReadonlyArray<NodePack> = Object.freeze([
+  corePack('source', [sourceVideo, sourceTelemetry]),
+  corePack('connector', [connectorThirdParty]),
+  corePack('video', [videoDecodeSample, videoScale]),
+  corePack('telemetry', [
+    telemetryKalman,
+    telemetryEma,
+    telemetryDerivative,
+    telemetryWindowAggregate,
+    telemetryResample,
+    telemetryTimeAlign,
+    telemetryOutlierRemoval,
+    telemetryGeofence,
+  ]),
+  corePack('model', [modelObjectDetection, modelSegmentation, modelDepth, modelVlm]),
+  corePack('logic', [
+    logicThreshold,
+    logicComparator,
+    logicBoolean,
+    logicDebounce,
+    logicDetectionGate,
+    logicProximityGate,
+  ]),
+  corePack('output', [outputDataCapture, outputEvent, outputVisualization]),
+]);
 
-function buildRegistry(): Map<string, CatalogEntry> {
-  const map = new Map<string, CatalogEntry>();
-  for (const mod of MODULES) {
-    const parsed = nodeTypeDefSchema.safeParse(mod.def);
-    if (!parsed.success) {
-      throw new Error(
-        `Invalid NodeTypeDef "${mod.def?.type}": ${parsed.error.issues[0]?.message ?? 'parse failed'}`,
-      );
-    }
-    const def = mod.def;
-    if (map.has(def.type)) throw new Error(`Duplicate catalog node type "${def.type}"`);
-    // Port ids are unique per direction (edge handles are direction-scoped in
-    // react-flow, so an input and an output may share an id, e.g. telemetry
-    // pass-through nodes). json outputs must say what they produce.
-    for (const ports of [def.inputs, def.outputs]) {
-      const ids = new Set<string>();
-      for (const port of ports) {
-        if (ids.has(port.id)) throw new Error(`Duplicate port id "${port.id}" on "${def.type}"`);
-        ids.add(port.id);
-      }
-    }
-    for (const port of def.outputs) {
-      if (port.channel === 'json' && !port.tag) {
-        throw new Error(`json output "${port.id}" on "${def.type}" must declare a tag`);
-      }
-    }
-    for (const constraint of def.constraints ?? []) {
-      for (const portId of constraint.ports) {
-        if (!def.inputs.some((p) => p.id === portId)) {
-          throw new Error(`Constraint on "${def.type}" references unknown input port "${portId}"`);
-        }
-      }
-    }
-    map.set(def.type, { def, executor: mod.executor });
-  }
-  return map;
-}
-
-const registry = buildRegistry();
+/** The catalog of exactly the core packs; what every entry point defaults to. */
+export const coreCatalog: Catalog = createCatalog(corePacks);
 
 export function getNodeType(type: string): NodeTypeDef | undefined {
-  return registry.get(type)?.def;
+  return coreCatalog.getNodeType(type);
 }
 
-export function getExecutor(type: string): NodeExecutor | undefined {
-  return registry.get(type)?.executor;
+export function getExecutor(type: string): ReturnType<Catalog['getExecutor']> {
+  return coreCatalog.getExecutor(type);
 }
 
 export function listNodeTypes(): NodeTypeDef[] {
-  return [...registry.values()].map((e) => e.def);
+  return coreCatalog.listNodeTypes();
+}
+
+/** The serialized catalog payload of `catalog` (default: the core catalog). Cached per catalog. */
+export function buildCatalogPayload(catalog: Catalog = coreCatalog): WorkflowCatalogPayload {
+  return catalog.payload();
 }
 
 /**

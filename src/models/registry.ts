@@ -21,7 +21,14 @@ import { z } from 'zod';
 
 export const MODEL_REGISTRY_PREFIX = 'models/';
 
+/**
+ * The families the core model nodes resolve (`runtime.modelRef.family`). The
+ * manifest's `family` is an open string (distribution M4) so a node pack can
+ * bring its own family without an engine release; these are the documented
+ * known values, not a validation list.
+ */
 export const MODEL_FAMILIES = ['detection', 'depth', 'segmentation'] as const;
+export type KnownModelFamily = (typeof MODEL_FAMILIES)[number];
 
 export const modelFileIntegritySchema = z.object({
   sha256: z.string().regex(/^[0-9a-f]{64}$/, 'sha256 must be 64 lowercase hex characters'),
@@ -30,7 +37,9 @@ export const modelFileIntegritySchema = z.object({
 
 export const modelManifestSchema = z.object({
   manifestVersion: z.literal(1),
-  family: z.enum(MODEL_FAMILIES),
+  // Open string: matches the directory under a registry root and a node's
+  // runtime.modelRef.family. See MODEL_FAMILIES for the core values.
+  family: z.string().min(1),
   name: z.string().min(1), // e.g. "yolov8n"; node config references this
   version: z.number().int().positive(),
   label: z.string().min(1).optional(), // human name for pickers

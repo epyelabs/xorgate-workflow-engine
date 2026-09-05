@@ -1,4 +1,6 @@
 import type { WorkflowDefinition } from './schemas/workflows';
+import { coreCatalog } from './catalog/index';
+import type { Catalog } from './catalog/pack';
 import { validateDefinitionForPublish, type ValidationIssue } from './validate';
 import { inspectTemplate as inspectDefinition, parseTemplate } from './local/manifest-builder';
 
@@ -20,8 +22,8 @@ export interface ValidateDefinitionResult {
   definition?: WorkflowDefinition;
 }
 
-/** The same publish validation the platform's editor runs. Never throws. */
-export function validateDefinition(template: unknown): ValidateDefinitionResult {
+/** The same publish validation the platform's editor runs. Never throws. `catalog` defaults to the core catalog. */
+export function validateDefinition(template: unknown, catalog: Catalog = coreCatalog): ValidateDefinitionResult {
   let definition: WorkflowDefinition;
   try {
     definition = parseTemplate(template);
@@ -31,7 +33,7 @@ export function validateDefinition(template: unknown): ValidateDefinitionResult 
       issues: [{ code: 'INVALID_DEFINITION', message: err instanceof Error ? err.message : String(err) }],
     };
   }
-  const { issues } = validateDefinitionForPublish(definition);
+  const { issues } = validateDefinitionForPublish(definition, catalog);
   return { ok: issues.length === 0, issues, definition };
 }
 
@@ -52,9 +54,9 @@ export interface InspectTemplateResult {
   requires: string[];
 }
 
-/** What a run of this template would need; the report `xwe validate` prints. Throws when the template does not parse. */
-export function inspectTemplate(template: unknown): InspectTemplateResult {
-  const info = inspectDefinition(parseTemplate(template));
+/** What a run of this template would need; the report `xwe validate` prints. Throws when the template does not parse. `catalog` defaults to the core catalog. */
+export function inspectTemplate(template: unknown, catalog: Catalog = coreCatalog): InspectTemplateResult {
+  const info = inspectDefinition(parseTemplate(template), catalog);
   return {
     definition: info.definition,
     issues: info.issues,

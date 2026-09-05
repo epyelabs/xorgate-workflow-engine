@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
-import { buildCatalogPayload } from '../catalog/serialize';
+import { buildCatalogPayload } from '../catalog/index';
 import { canResolve, installedVersion, lazyRequire, ownPackageVersion } from '../engine/lazy-require';
 import { displayPath } from '../local/paths';
 import { fetchRegistryIndex, registryUrlFrom, RegistryHttpError } from '../local/registry-client';

@@ -1,5 +1,6 @@
 import type { WorkflowDefinition } from '../schemas/workflows';
-import { getExecutor, getNodeType } from '../catalog/index';
+import { coreCatalog } from '../catalog/index';
+import type { Catalog } from '../catalog/pack';
 import type {
   EngineArtifactSink,
   EngineEventRecord,
@@ -63,6 +64,8 @@ export interface EngineRunDeps {
   /** Wall-clock budget; on expiry everything is cancelled and the run fails. */
   deadlineMs?: number;
   log?: (message: string) => void;
+  /** The node registry to run against (default: the core catalog). */
+  catalog?: Catalog;
 }
 
 export interface EngineStep {
@@ -148,12 +151,13 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
   const def = spec.definition;
   const log = deps.log ?? ((m: string) => console.log(`engine[${spec.runId}]: ${m}`));
   const capacity = deps.channelCapacity ?? DEFAULT_CHANNEL_CAPACITY;
+  const catalog = deps.catalog ?? coreCatalog;
 
   // Pre-flight structural guards (published definitions already pass these;
   // fail like the PoC runner did, with no steps).
   const typeByNode = new Map<string, NodeTypeDef>();
   for (const node of def.nodes) {
-    const typeDef = getNodeType(node.type);
+    const typeDef = catalog.getNodeType(node.type);
     if (!typeDef) return failedOutcome(spec, node.id, `Unknown node type "${node.type}"`);
     typeByNode.set(node.id, typeDef);
   }
@@ -295,7 +299,7 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
         const at = issue?.path.length ? ` at "${issue.path.join('.')}"` : '';
         throw new Error(`Invalid config${at}: ${issue?.message ?? 'parse failed'}`);
       }
-      const executor = getExecutor(node.type);
+      const executor = catalog.getExecutor(node.type);
       if (!executor) throw new Error(`No executor registered for "${node.type}"`);
 
       const ctx: EngineRunCtx = {
