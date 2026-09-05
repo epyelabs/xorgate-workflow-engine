@@ -95,6 +95,23 @@ check(
   check(`fixture model manifests parse (${manifests.length})`, manifests.length > 0 && bad.length === 0, bad.join(', '));
 }
 
+// 4b. Manifest v1 stays frozen with the additive `files` block (M3): a manifest
+// without it parses, one with it parses and keeps it, a malformed one is refused.
+{
+  const base = JSON.parse(readFileSync(join(root, 'fixtures/models/detection/yolov8n/1/manifest.json'), 'utf8'));
+  const { files: _drop, ...without } = base;
+  const withFiles = { ...without, files: { 'model.onnx': { sha256: 'a'.repeat(64), sizeBytes: 12851122 } } };
+  const noFiles = cjsRoot.modelManifestSchema.safeParse(without);
+  const yesFiles = cjsRoot.modelManifestSchema.safeParse(withFiles);
+  const badSha = cjsRoot.modelManifestSchema.safeParse({ ...without, files: { 'model.onnx': { sha256: 'nope', sizeBytes: 1 } } });
+  const badSize = cjsRoot.modelManifestSchema.safeParse({ ...without, files: { 'model.onnx': { sha256: 'a'.repeat(64), sizeBytes: -1 } } });
+  check('model manifest without `files` still parses (v1 frozen)', noFiles.success && noFiles.data.files === undefined);
+  check('model manifest with `files` parses and keeps sha256/sizeBytes', yesFiles.success && yesFiles.data.files['model.onnx'].sha256 === 'a'.repeat(64) && yesFiles.data.files['model.onnx'].sizeBytes === 12851122);
+  check('model manifest `files` rejects a malformed sha256 or a negative size', !badSha.success && !badSize.success);
+  check('root exports modelFileIntegritySchema', typeof cjsRoot.modelFileIntegritySchema?.safeParse === 'function');
+  check('cjs local exports the model chain, registry client and checkModelDir', ['createModelChain', 'dirResolver', 'cacheResolver', 'httpResolver', 'pullModel', 'fetchRegistryIndex', 'checkModelDir', 'parseModelSpec'].every((n) => typeof cjsLocal[n] === 'function'));
+}
+
 // 5. No cloud-provider packages anywhere: package.json, lockfile, and the src/ tree.
 const AWS_RE = /@aws-sdk|aws-lambda/;
 for (const f of ['package.json', 'package-lock.json']) {

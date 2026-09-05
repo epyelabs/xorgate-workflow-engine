@@ -13,10 +13,18 @@ export interface OrtTensor {
   data: Float32Array;
   dims: readonly number[];
 }
+export interface OrtValueMetadata {
+  name: string;
+  shape?: ReadonlyArray<number | string>;
+}
 export interface OrtSession {
   inputNames: string[];
   outputNames: string[];
+  /** Present on onnxruntime-node >= 1.21; `xwe models check` prints it when there. */
+  inputMetadata?: ReadonlyArray<OrtValueMetadata>;
+  outputMetadata?: ReadonlyArray<OrtValueMetadata>;
   run(feeds: Record<string, unknown>): Promise<Record<string, OrtTensor>>;
+  release?(): Promise<void>;
 }
 export interface OrtModule {
   Tensor: new (type: 'float32', data: Float32Array, dims: number[]) => unknown;

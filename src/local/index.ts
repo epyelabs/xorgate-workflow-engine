@@ -26,3 +26,28 @@ export { buildLocalManifest, loadDefinition, parseTemplate } from './manifest-bu
 export type { BuildManifestArgs } from './manifest-builder';
 export { localizeBinding, localizeBindings } from './bindings';
 export { captureFormatsOf } from './capture-formats';
+
+// Models: the resolver chain, the registry client and the directory check.
+export {
+  cacheResolver,
+  createModelChain,
+  dirResolver,
+  findModelInRoot,
+  httpResolver,
+  ModelNotFoundError,
+} from './models';
+export type { ModelChain, ModelChainOptions, ModelResolver, ModelResolveContext, ResolvedModel } from './models';
+export { formatModelRef, parseModelName, parseModelSpec } from './model-ref';
+export type { ModelRef } from './model-ref';
+export {
+  DEFAULT_MODEL_REGISTRY,
+  fetchRegistryIndex,
+  ModelIntegrityError,
+  ModelNotInRegistryError,
+  pullModel,
+  registryUrlFrom,
+} from './registry-client';
+export type { PullOptions, PullResult } from './registry-client';
+export { checkModelDir, formatModelCheckLine } from './check-model';
+export type { CheckModelDirOptions, ModelCheckLine, ModelCheckReport, ModelCheckStage } from './check-model';
+export { displayPath, modelCacheDir } from './paths';

@@ -23,6 +23,11 @@ export const MODEL_REGISTRY_PREFIX = 'models/';
 
 export const MODEL_FAMILIES = ['detection', 'depth', 'segmentation'] as const;
 
+export const modelFileIntegritySchema = z.object({
+  sha256: z.string().regex(/^[0-9a-f]{64}$/, 'sha256 must be 64 lowercase hex characters'),
+  sizeBytes: z.number().int().nonnegative(),
+});
+
 export const modelManifestSchema = z.object({
   manifestVersion: z.literal(1),
   family: z.enum(MODEL_FAMILIES),
@@ -62,8 +67,14 @@ export const modelManifestSchema = z.object({
     maskThreshold: z.number().min(0).max(1).default(0.5),
   }),
   quantization: z.enum(['fp32', 'fp16', 'int8']).optional(),
+  // Additive (distribution M3): per-file integrity, keyed by the file's name
+  // next to the manifest ("model.onnx"). Verified on pull and by
+  // `xwe models check`; a manifest without it still parses and is pulled with
+  // a warning instead of a verification. Never required.
+  files: z.record(z.string().min(1), modelFileIntegritySchema).optional(),
 });
 export type ModelManifest = z.infer<typeof modelManifestSchema>;
+export type ModelFileIntegrity = z.infer<typeof modelFileIntegritySchema>;
 
 export function modelVersionPrefix(family: string, name: string, version: number): string {
   return `${MODEL_REGISTRY_PREFIX}${family}/${name}/${version}/`;

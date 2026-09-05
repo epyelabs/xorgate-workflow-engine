@@ -1,7 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import * as path from 'node:path';
 import type {
   EngineArtifactSink,
@@ -12,10 +11,13 @@ import type {
   EngineSourceReader,
 } from '../catalog/types';
 import type { ModelManifest } from '../models/registry';
-import { modelManifestSchema } from '../models/registry';
 import type { EngineRunOutcome } from '../engine/index';
 import { buildEngineResult, type EngineResult } from '../engine/manifest';
 import { lazyRequire } from '../engine/lazy-require';
+import { parseModelName } from './model-ref';
+import { createModelChain, type ModelChain } from './models';
+import { displayPath, modelCacheDir } from './paths';
+import { registryUrlFrom } from './registry-client';
 
 /**
  * LocalTargetIO (portable-engine M3): the filesystem shell around the
@@ -43,50 +45,42 @@ export const defaultLocalLog = (msg: string): void => {
 // Sources
 
 export interface LocalSourceOptions {
-  /** Model registry roots, searched in order for <family>/<name>/<version>/. */
+  /**
+   * Model registry roots, searched in order for <family>/<name>/<version>/.
+   * Ignored when `models` (a resolver chain) is given.
+   */
   modelDirs: string[];
   /** Resolves paths in bindings/refs that are not absolute. Default: cwd. */
   baseDir?: string;
   /** Diagnostic lines (model resolution). Default: stderr, `[xwe]` prefixed. */
   log?: (message: string) => void;
+  /** The resolver chain (explicit roots, cache, registry); built from `modelDirs` alone when absent. */
+  models?: ModelChain;
 }
 
-/** Default model search path: ./fixtures/models, then ~/.xorgate/models. */
-export function defaultModelDirs(baseDir = process.cwd()): string[] {
-  return [path.join(baseDir, 'fixtures', 'models'), path.join(homedir(), '.xorgate', 'models')];
-}
-
-function resolveLocalModel(
-  modelDirs: string[],
-  family: string,
-  name: string,
-): { manifest: ModelManifest; modelPath: string } {
-  for (const dir of modelDirs) {
-    const nameDir = path.join(dir, family, name);
-    if (!existsSync(nameDir)) continue;
-    const versions = readdirSync(nameDir, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && /^\d+$/.test(e.name))
-      .map((e) => Number(e.name))
-      .sort((a, b) => b - a);
-    for (const version of versions) {
-      const versionDir = path.join(nameDir, String(version));
-      const manifestPath = path.join(versionDir, 'manifest.json');
-      const modelPath = path.join(versionDir, 'model.onnx');
-      if (!existsSync(manifestPath) || !existsSync(modelPath)) continue;
-      const manifest = modelManifestSchema.parse(JSON.parse(readFileSync(manifestPath, 'utf8')));
-      return { manifest, modelPath };
-    }
-  }
-  throw new Error(
-    `Model ${family}/${name} not found under: ${modelDirs.join(', ')} ` +
-      `(expected <dir>/${family}/${name}/<version>/{manifest.json,model.onnx}, the registry layout)`,
-  );
+/**
+ * Default model search path: the cache only (`XWE_MODELS_DIR`, else
+ * `~/.xorgate/models`). `./fixtures/models` left the default chain with the
+ * registry client; a checkout passes `--models-dir fixtures/models`.
+ */
+export function defaultModelDirs(baseDir = process.cwd(), env: NodeJS.ProcessEnv = process.env): string[] {
+  return [modelCacheDir(env, baseDir)];
 }
 
 export function localSources(opts: LocalSourceOptions): EngineSourceReader {
   const baseDir = opts.baseDir ?? process.cwd();
   const log = opts.log ?? defaultLocalLog;
   const abs = (p: string): string => (path.isAbsolute(p) ? p : path.join(baseDir, p));
+  const chain =
+    opts.models ??
+    createModelChain({
+      modelDirs: opts.modelDirs.map(abs),
+      cacheDir: modelCacheDir(process.env, baseDir),
+      registryUrl: registryUrlFrom(process.env),
+      pull: false,
+      cwd: baseDir,
+      log,
+    });
   const modelCache = new Map<string, Promise<{ manifest: ModelManifest; modelPath: string }>>();
   return {
     async readTelemetryWindow() {
@@ -110,10 +104,11 @@ export function localSources(opts: LocalSourceOptions): EngineSourceReader {
       const cacheKey = `${family}/${name}`;
       let entry = modelCache.get(cacheKey);
       if (!entry) {
-        entry = Promise.resolve().then(() => {
-          const resolved = resolveLocalModel(opts.modelDirs.map(abs), family, name);
-          log(`model ${family}/${name} v${resolved.manifest.version} <- ${resolved.modelPath}`);
-          return resolved;
+        entry = chain.resolve(parseModelName(family, name)).then((resolved) => {
+          log(
+            `model ${resolved.ref.family}/${resolved.ref.name} v${resolved.ref.version} <- ${displayPath(resolved.modelPath, baseDir, { bare: true })}`,
+          );
+          return { manifest: resolved.manifest, modelPath: resolved.modelPath };
         });
         modelCache.set(cacheKey, entry);
       }

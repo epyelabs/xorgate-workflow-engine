@@ -1,15 +1,18 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import * as path from 'node:path';
 import { buildCatalogPayload } from '../catalog/serialize';
 import { canResolve, installedVersion, lazyRequire, ownPackageVersion } from '../engine/lazy-require';
+import { displayPath } from '../local/paths';
+import { fetchRegistryIndex, registryUrlFrom, RegistryHttpError } from '../local/registry-client';
 import { defaultModelDirs, resolveFfmpeg } from '../local/target';
 
 /**
  * `xwe doctor`: everything a run depends on, one line each, the fix on the
  * same line when something is absent. Exits non-zero when a required piece
- * (ffmpeg, the ONNX Runtime binding) is missing.
+ * (ffmpeg, the ONNX Runtime binding) is missing. The registry line reports
+ * reachability but never fails the check: a run needs the registry only when
+ * it pulls.
  */
 
 export interface DoctorReport {
@@ -19,14 +22,6 @@ export interface DoctorReport {
 
 const PAD = 18;
 const row = (label: string, text: string): string => `  ${label.padEnd(PAD)}${text}`;
-
-/** Roots under the working directory print as `./x`, under home as `~/x`, else absolute. */
-function display(p: string, cwd: string): string {
-  const rel = path.relative(cwd, p);
-  if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return `./${rel}`;
-  const home = homedir();
-  return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
-}
 
 function ffmpegLine(env: NodeJS.ProcessEnv): { text: string; ok: boolean } {
   const resolved = resolveFfmpeg(env);
@@ -95,15 +90,31 @@ export function listModelsUnder(root: string): string[] {
 function modelsLines(roots: string[], cwd: string): string[] {
   return roots.map((root, i) => {
     const label = i === 0 ? 'models' : '';
-    if (!existsSync(root)) return row(label, `${display(root, cwd)} (not present)`);
+    if (!existsSync(root)) return row(label, `${displayPath(root, cwd)} (not present)`);
     const models = listModelsUnder(root);
     const summary =
       models.length === 0 ? 'empty' : `${models.length} cached: ${models.join(', ')}`;
-    return row(label, `${display(root, cwd)} (${summary})`);
+    return row(label, `${displayPath(root, cwd)} (${summary})`);
   });
 }
 
-export function doctorReport(opts: { modelDirs?: string[]; env?: NodeJS.ProcessEnv; cwd?: string } = {}): DoctorReport {
+/** `https://models.xorgate.io (index: 4 models)`, or the reason it could not be read. */
+async function registryLine(env: NodeJS.ProcessEnv, timeoutMs: number): Promise<string> {
+  const url = registryUrlFrom(env);
+  try {
+    const { models, invalid } = await fetchRegistryIndex(url, { timeoutMs });
+    const extra = invalid > 0 ? `, ${invalid} unparseable` : '';
+    return `${url} (index: ${models.length} model${models.length === 1 ? '' : 's'}${extra})`;
+  } catch (err) {
+    if (err instanceof RegistryHttpError) return `${url} (index.json: HTTP ${err.status})`;
+    const cause = err instanceof Error ? ((err as { cause?: { code?: string } }).cause?.code ?? err.message) : String(err);
+    return `${url} (unreachable: ${cause})`;
+  }
+}
+
+export async function doctorReport(
+  opts: { modelDirs?: string[]; env?: NodeJS.ProcessEnv; cwd?: string; registryTimeoutMs?: number } = {},
+): Promise<DoctorReport> {
   const env = opts.env ?? process.env;
   const cwd = opts.cwd ?? process.cwd();
   const lines: string[] = [];
@@ -122,9 +133,9 @@ export function doctorReport(opts: { modelDirs?: string[]; env?: NodeJS.ProcessE
   lines.push(row('vlm providers', vlmLine()));
 
   const explicit = (opts.modelDirs ?? []).map((d) => (path.isAbsolute(d) ? d : path.join(cwd, d)));
-  lines.push(...modelsLines([...explicit, ...defaultModelDirs(cwd)], cwd));
+  lines.push(...modelsLines([...explicit, ...defaultModelDirs(cwd, env)], cwd));
 
-  lines.push(row('registry', 'not configured'));
+  lines.push(row('registry', await registryLine(env, opts.registryTimeoutMs ?? 5_000)));
 
   const payload = buildCatalogPayload();
   lines.push(row('catalog', `${payload.nodes.length} nodes, core ${payload.catalogVersion}, no packs`));

@@ -104,5 +104,11 @@
     "kind": "yolov8",
     "nmsIouThreshold": 0.45
   },
-  "quantization": "fp32"
+  "quantization": "fp32",
+  "files": {
+    "model.onnx": {
+      "sha256": "8d29aa6e6235b07c9504075f66a5538e9b42ab040123bcc3c0b5a810ab013b6e",
+      "sizeBytes": 12851122
+    }
+  }
 }

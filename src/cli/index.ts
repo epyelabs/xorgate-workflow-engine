@@ -7,6 +7,7 @@ import { inspectTemplate, loadDefinition } from '../local/manifest-builder';
 import { localHost } from '../local/host';
 import { ndjsonProgress, resolveFfmpeg } from '../local/target';
 import { doctorReport } from './doctor';
+import { ModelsUsageError, runModelsCommand } from './models';
 
 /**
  * xwe — the workflow engine CLI: argument parsing over createEngine + localHost.
@@ -16,6 +17,7 @@ import { doctorReport } from './doctor';
  *           [--out ./out] [--run-id id] [--models-dir dir]... [--secrets s.json]
  *           [--progress json] [--emit-video] [--window from,to]
  *   xwe run --manifest <manifest.json> [same flags]
+ *   xwe models list | pull <family>/<name>[@v] | path <family>/<name>[@v] | check <dir>
  *   xwe doctor [--models-dir dir]...
  *
  * Exit codes: 0 success · 1 run failed (failing node named) · 2 usage/config.
@@ -25,13 +27,15 @@ const USAGE = `usage:
   xwe validate <template.json>
   xwe run <template.json> --input <key>=<path> ... [options]
   xwe run --manifest <manifest.json> [options]
+  xwe models list | pull <family>/<name>[@<version>] | path <family>/<name>[@<version>] | check <dir>
   xwe doctor [--models-dir <dir>]...
 
 options:
   --input <key>=<path>   bind a source node (key: video | telemetry | <nodeId>)
   --out <dir>            artifact root (default ./out); run writes <out>/<runId>/
   --run-id <id>          run id (default local-<timestamp>)
-  --models-dir <dir>     model registry root(s), searched before ./fixtures/models and ~/.xorgate/models
+  --models-dir <dir>     model registry root(s), searched before the cache (XWE_MODELS_DIR, default ~/.xorgate/models)
+  --pull                 fetch a model the graph names from the registry when it is not on disk (or XWE_MODELS_PULL=1)
   --secrets <file>       JSON { "<logical-name>": "<value>" }; env XORGATE_SECRET_* also works
   --progress json        emit NDJSON progress on stdout
   --emit-video           mux visualization frames into out/<runId>/video/<nodeId>.mp4
@@ -82,6 +86,7 @@ interface RunFlags {
   progress?: string;
   emitVideo?: boolean;
   window?: string;
+  pull?: boolean;
 }
 
 async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promise<number> {
@@ -116,6 +121,7 @@ async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promis
     host: localHost({
       modelDirs: flags.modelsDir,
       outDir: flags.out,
+      ...(flags.pull ? { models: { pull: true } } : {}),
       ...(secretsFile ? { secrets: secretsFile } : {}),
       ...(flags.progress === 'json' ? { progress: ndjsonProgress((line) => console.log(line)) } : {}),
     }),
@@ -146,8 +152,8 @@ async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promis
   return 0;
 }
 
-function cmdDoctor(modelDirs: string[]): number {
-  const report = doctorReport({ modelDirs });
+async function cmdDoctor(modelDirs: string[]): Promise<number> {
+  const report = await doctorReport({ modelDirs });
   for (const line of report.lines) console.log(line);
   return report.ok ? 0 : 1;
 }
@@ -173,6 +179,7 @@ async function main(): Promise<number> {
         progress: { type: 'string' },
         'emit-video': { type: 'boolean' },
         window: { type: 'string' },
+        pull: { type: 'boolean' },
       },
     });
     return cmdRun(positionals[0], {
@@ -185,7 +192,11 @@ async function main(): Promise<number> {
       progress: values.progress,
       emitVideo: values['emit-video'],
       window: values.window,
+      pull: values.pull,
     });
+  }
+  if (command === 'models') {
+    return runModelsCommand(rest);
   }
   if (command === 'doctor') {
     const { values } = parseArgs({
@@ -202,6 +213,6 @@ main().then(
   (code) => process.exit(code),
   (err) => {
     console.error(`xwe: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(err instanceof XweUsageError ? err.exitCode : 2);
+    process.exit(err instanceof XweUsageError || err instanceof ModelsUsageError ? err.exitCode : 2);
   },
 );

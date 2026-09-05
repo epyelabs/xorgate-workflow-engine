@@ -3,10 +3,12 @@
 // the fixtures, driven through the real CLI, plus the library surface
 // (createEngine + localHost in ESM and CJS), the local `path` alias and
 // `xwe doctor`. Run `npm run build` first (`npm test` does).
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, existsSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, existsSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -18,14 +20,17 @@ function check(name, ok, detail = '') {
   if (!ok) failed = true;
 }
 
-function xwe(args) {
+function xwe(args, env = {}) {
   const started = Date.now();
   const res = spawnSync(process.execPath, [join(root, 'dist/cjs/cli/index.js'), ...args], {
     cwd: root,
     encoding: 'utf8',
+    env: { ...process.env, XWE_MODELS_DIR: join(outRoot, 'empty-cache'), ...env },
   });
   return { ...res, seconds: (Date.now() - started) / 1000 };
 }
+const sha256 = (file) => createHash('sha256').update(readFileSync(file)).digest('hex');
+const MODELS_DIR = ['--models-dir', 'fixtures/models'];
 
 const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
 
@@ -83,6 +88,7 @@ const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
     'run',
     'fixtures/templates/perimeter-person-detect.json',
     '--input', 'video=fixtures/video/drive.mp4',
+    ...MODELS_DIR,
     '--out', outRoot,
     '--run-id', 'golden-perimeter',
   ]);
@@ -93,6 +99,7 @@ const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
   check('result: succeeded, 5 ok steps', result.status === 'succeeded' && result.steps.length === 5 && result.steps.every((s) => s.status === 'ok'));
   const decode = result.steps.find((s) => s.nodeId === 'n2');
   check('decoded 50 frames at 2 fps', /^50 frame\(s\) sampled at 2 fps/.test(decode?.output ?? ''), decode?.output);
+  check('model log line names the version and a cwd-relative path', res.stderr.includes('[xwe] model detection/yolov8n v1 <- fixtures/models/detection/yolov8n/1/model.onnx'), res.stderr.split('\n').find((l) => l.startsWith('[xwe] model')));
   const detect = result.steps.find((s) => s.nodeId === 'n3');
   const m = (detect?.output ?? '').match(/^(\d+) detection\(s\) over 50 frame\(s\)/);
   // Pinned from the first laptop run (81); tolerance absorbs onnx float
@@ -108,6 +115,7 @@ const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
     'run',
     'fixtures/templates/perimeter-visualize.json',
     '--input', 'video=fixtures/video/drive.mp4',
+    ...MODELS_DIR,
     '--out', outRoot,
     '--run-id', 'golden-viz',
     '--emit-video',
@@ -222,7 +230,161 @@ for (const [fmt, argv, imports] of [
       return idx > 0 && idx > prev;
     }), lines.slice(1).join(' | '));
   check('doctor catalog line carries the frozen core hash', lines.some((l) => l === '  catalog           26 nodes, core e481243f5ffe4678, no packs'));
-  check('doctor registry line is "not configured" until the registry ships', lines.some((l) => l === '  registry          not configured'));
+  check('doctor registry line names the registry URL and its reachability', lines.some((l) => /^ {2}registry {10}https:\/\/models\.xorgate\.io \((index: \d+ models?|unreachable: .+|index\.json: HTTP \d+)\)$/.test(l)), lines.find((l) => l.startsWith('  registry')));
+  check('doctor models lines are the explicit root and the cache only (no ./fixtures/models by default)', !lines.some((l) => l.includes('./fixtures/models')) && lines.some((l) => l.startsWith('  models            ') && l.includes('empty-cache')), lines.filter((l) => /^ {2}(models| {6})/.test(l)).join(' | '));
+}
+
+// --- models: the registry mirror, pull, verify, --pull, path, list ------------
+// A static server over a mirror built by scripts/registry-sync.mjs stands in
+// for https://models.xorgate.io (the acceptance runs the same against `npx serve`).
+// It runs as a separate process: spawnSync below blocks this process's event loop.
+function serveDir(dir) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [join(root, 'scripts/serve-static.mjs'), dir, '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let buf = '';
+    child.stdout.on('data', (chunk) => {
+      buf += chunk;
+      const m = buf.match(/^listening (http:\/\/[^\s]+)/m);
+      if (m) resolve({ server: child, url: m[1] });
+    });
+    child.on('exit', (code) => reject(new Error(`serve-static exited early with ${code}`)));
+    setTimeout(() => reject(new Error('serve-static did not start in 5s')), 5000).unref();
+  });
+}
+
+{
+  const mirror = join(outRoot, 'registry-mirror');
+  const sync = spawnSync(process.execPath, [join(root, 'scripts/registry-sync.mjs'), 'fixtures/models', mirror], { cwd: root, encoding: 'utf8' });
+  check('registry-sync builds a mirror with index.json', sync.status === 0 && existsSync(join(mirror, 'index.json')) && existsSync(join(mirror, 'detection/yolov8n/1/model.onnx')), sync.stderr.trim() || sync.stdout.trim().split('\n').at(-1));
+  const index = readJson(join(mirror, 'index.json'));
+  const fixtureSha = sha256(join(root, 'fixtures/models/detection/yolov8n/1/model.onnx'));
+  check('index.json is an array of manifests carrying files.sha256', Array.isArray(index) && index.length === 1 && index[0].name === 'yolov8n' && index[0].files?.['model.onnx']?.sha256 === fixtureSha, JSON.stringify(index[0]?.files));
+
+  const { server, url } = await serveDir(mirror);
+  const cache = join(outRoot, 'cache');
+  const env = { XWE_MODEL_REGISTRY: url, XWE_MODELS_DIR: cache };
+  try {
+    let res = xwe(['models', 'list'], env);
+    check('models list reads the mirror index (nothing cached yet)', res.status === 0 && res.stdout.includes(`registry ${url} (1 model)`) && /detection\/yolov8n@1 +yolov8n +12\.3 MB$/m.test(res.stdout) && !res.stdout.includes('cached'), res.stdout.trim() || res.stderr.trim());
+
+    res = xwe(['models', 'pull', 'detection/yolov8n'], env);
+    check('models pull downloads into the cache and verifies sha256', res.status === 0 && res.stdout.trim() === `pulled detection/yolov8n@1 -> ${cache}/detection/yolov8n/1 (model.onnx 12.3 MB, sha256 verified)`, res.stdout.trim() || res.stderr.trim());
+    check('pulled files are byte-identical to the fixture', existsSync(join(cache, 'detection/yolov8n/1/manifest.json')) && sha256(join(cache, 'detection/yolov8n/1/model.onnx')) === fixtureSha);
+
+    res = xwe(['models', 'list'], env);
+    check('models list marks the pulled model as cached', res.status === 0 && new RegExp(`detection/yolov8n@1 .*cached \\(${cache.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`).test(res.stdout), res.stdout.trim());
+
+    res = xwe(['models', 'pull', 'detection/yolov8n@1'], env);
+    check('models pull of a cached version downloads nothing', res.status === 0 && res.stdout.startsWith('detection/yolov8n@1 already in '), res.stdout.trim());
+
+    res = xwe(['models', 'path', 'detection/yolov8n'], env);
+    check('models path prints the cached file and the root', res.status === 0 && res.stdout.split('\n')[0] === join(cache, 'detection/yolov8n/1/model.onnx') && res.stdout.includes('detection/yolov8n v1, from the cache'), res.stdout.trim());
+
+    res = xwe(['models', 'pull', 'detection/nope'], env);
+    check('models pull of an unknown model exits 1 and names the registry', res.status === 1 && res.stderr.includes('model detection/nope is not in the registry'), res.stderr.trim());
+
+    // A corrupted mirror: one flipped byte must be caught and nothing kept.
+    const bad = join(outRoot, 'registry-bad');
+    cpSync(mirror, bad, { recursive: true });
+    const onnx = join(bad, 'detection/yolov8n/1/model.onnx');
+    const bytes = readFileSync(onnx);
+    bytes[1000] ^= 0xff;
+    writeFileSync(onnx, bytes);
+    const { server: badServer, url: badUrl } = await serveDir(bad);
+    const cache2 = join(outRoot, 'cache-bad');
+    try {
+      res = xwe(['models', 'pull', 'detection/yolov8n'], { XWE_MODEL_REGISTRY: badUrl, XWE_MODELS_DIR: cache2 });
+      check('a sha256 mismatch exits 1 and names the model', res.status === 1 && /^xwe: detection\/yolov8n@1: model\.onnx sha256 mismatch .*; nothing kept$/m.test(res.stderr), res.stderr.trim());
+      check('a sha256 mismatch keeps no file in the cache', !existsSync(join(cache2, 'detection/yolov8n/1/model.onnx')) && !existsSync(join(cache2, 'detection/yolov8n/1/manifest.json')) && (!existsSync(join(cache2, 'detection/yolov8n/1')) || readdirSync(join(cache2, 'detection/yolov8n/1')).length === 0));
+    } finally {
+      badServer.kill();
+    }
+
+    // --pull on a run with an empty cache: the registry is the third link.
+    const cache3 = join(outRoot, 'cache-pull');
+    res = xwe(['run', 'fixtures/templates/perimeter-person-detect.json', '--input', 'video=fixtures/video/drive.mp4', '--out', outRoot, '--run-id', 'golden-pull', '--pull'], { XWE_MODEL_REGISTRY: url, XWE_MODELS_DIR: cache3 });
+    check('run --pull fetches the missing model and succeeds', res.status === 0 && res.stderr.includes(`[xwe] pulled detection/yolov8n@1 from ${url}`) && res.stderr.includes('sha256 verified'), res.stderr.trim().split('\n').slice(-3).join(' | '));
+    const pulledResult = readJson(join(outRoot, 'golden-pull', 'result.json'));
+    const pulledDetect = pulledResult.steps.find((s) => s.nodeId === 'n3');
+    check('run --pull: same detections from the pulled model', /^\d+ detection\(s\) over 50 frame\(s\) \(yolov8n v1/.test(pulledDetect?.output ?? '') && Math.abs(Number(pulledDetect.output.match(/^(\d+)/)[1]) - 81) <= 15, pulledDetect?.output);
+
+    res = xwe(['run', 'fixtures/templates/perimeter-person-detect.json', '--input', 'video=fixtures/video/drive.mp4', '--out', outRoot, '--run-id', 'golden-pull-env'], { XWE_MODEL_REGISTRY: url, XWE_MODELS_DIR: cache3, XWE_MODELS_PULL: '1' });
+    check('XWE_MODELS_PULL=1 with a warm cache runs without pulling again', res.status === 0 && !res.stderr.includes('pulled ') && res.stderr.includes(`[xwe] model detection/yolov8n v1 <- ${join(cache3, 'detection/yolov8n/1/model.onnx')}`), res.stderr.trim().split('\n')[0]);
+
+    // No pull, empty cache: the documented two-line error, exit 1, result.json written.
+    const cache4 = join(outRoot, 'cache-empty');
+    res = xwe(['run', 'fixtures/templates/perimeter-person-detect.json', '--input', 'video=fixtures/video/drive.mp4', '--models-dir', './models-missing', '--out', outRoot, '--run-id', 'golden-nomodel'], { XWE_MODEL_REGISTRY: url, XWE_MODELS_DIR: cache4 });
+    check('a model in no root fails the step with the documented text', res.status === 1 && res.stderr.includes(`xwe: run failed at node n3: model detection/yolov8n not found under ./models-missing, ${cache4}\n  (run \`xwe models pull detection/yolov8n\`, or pass --pull)`), res.stderr.trim().split('\n').slice(-2).join(' | '));
+    check('a model miss still lands result.json with the failing node', readJson(join(outRoot, 'golden-nomodel', 'result.json')).failedNodeId === 'n3');
+
+    // doctor against the mirror
+    res = xwe(['doctor'], env);
+    check('doctor reports the registry index size when reachable', res.stdout.includes(`  registry          ${url} (index: 1 model)`), res.stdout.split('\n').find((l) => l.startsWith('  registry')));
+  } finally {
+    server.kill();
+  }
+}
+
+// --- models check + bring-your-own model (acme-test) --------------------------
+{
+  const own = join(outRoot, 'own-models');
+  const dir = join(own, 'detection/acme-test/1');
+  mkdirSync(dir, { recursive: true });
+  cpSync(join(root, 'fixtures/models/detection/yolov8n/1/model.onnx'), join(dir, 'model.onnx'));
+  const manifest = readJson(join(root, 'fixtures/models/detection/yolov8n/1/manifest.json'));
+  delete manifest.files;
+  manifest.name = 'acme-test';
+  manifest.label = 'Acme test detector';
+  writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+
+  let res = xwe(['models', 'check', dir]);
+  const lines = res.stdout.trim().split('\n');
+  check('models check exits 0 with four ok lines', res.status === 0 && lines.length === 4 && lines.every((l) => /^(manifest|model|session|output) {2,}ok {3}/.test(l)), res.stdout.trim() || res.stderr.trim());
+  check('check line 1: identity, kind, classes, geometry', lines[0] === 'manifest   ok   detection/acme-test v1, yolov8, 80 classes, 640x640 nchw rgb', lines[0]);
+  check('check line 2: sha256 recorded when the manifest lacked files', lines[1] === 'model      ok   model.onnx 12.3 MB, sha256 recorded in manifest.json', lines[1]);
+  check('check line 3: session with the input tensor', /^session {4}ok {3}onnxruntime-node \d+\.\d+\.\d+, input "images" \[1,3,640,640\]$/.test(lines[2]), lines[2]);
+  check('check line 4: output shape matches yolov8 with 80 classes', lines[3] === 'output     ok   "output0" [1,84,8400] matches yolov8 with 80 classes (4 + 80)', lines[3]);
+  const filled = readJson(join(dir, 'manifest.json'));
+  check('check filled files.sha256 and sizeBytes into manifest.json', filled.files?.['model.onnx']?.sha256 === sha256(join(dir, 'model.onnx')) && filled.files['model.onnx'].sizeBytes === 12851122, JSON.stringify(filled.files));
+  res = xwe(['models', 'check', dir]);
+  check('a second check verifies the recorded sha256', res.status === 0 && res.stdout.split('\n')[1] === 'model      ok   model.onnx 12.3 MB, sha256 verified', res.stdout.split('\n')[1]);
+
+  // A wrong class list fails the output stage with both numbers.
+  const wrong = join(outRoot, 'own-models-wrong/detection/acme-two/1');
+  mkdirSync(wrong, { recursive: true });
+  cpSync(join(dir, 'model.onnx'), join(wrong, 'model.onnx'));
+  writeFileSync(join(wrong, 'manifest.json'), JSON.stringify({ ...filled, name: 'acme-two', classNames: ['forklift', 'pallet'] }, null, 2));
+  res = xwe(['models', 'check', wrong]);
+  check('a class-count mismatch fails the output line with both numbers', res.status === 1 && res.stdout.includes('output     fail "output0" [1,84,8400] does not match yolov8 with 2 classes: expected 4 + 2 = 6 rows, got 84 (a model with 80 classes?)'), res.stdout.trim().split('\n').at(-1));
+
+  // The bring-your-own golden: the perimeter template naming acme-test.
+  const template = readJson(join(root, 'fixtures/templates/perimeter-person-detect.json'));
+  for (const n of template.nodes) if (n.type === 'model.object_detection') n.data.config.model = 'acme-test';
+  const templateFile = join(outRoot, 'perimeter-acme.json');
+  writeFileSync(templateFile, JSON.stringify(template));
+  res = xwe(['run', templateFile, '--input', 'video=fixtures/video/drive.mp4', '--models-dir', own, '--out', outRoot, '--run-id', 'golden-acme']);
+  check('bring-your-own run exits 0', res.status === 0, res.stderr.split('\n').at(-2) ?? '');
+  const result = readJson(join(outRoot, 'golden-acme', 'result.json'));
+  const detect = result.steps.find((s) => s.nodeId === 'n3');
+  const m = (detect?.output ?? '').match(/^(\d+) detection\(s\) over 50 frame\(s\) \(acme-test v1, ~\d+ ms\/frame\)$/);
+  check('bring-your-own: 81 ± 15 detections and the summary names acme-test v1', m !== null && Math.abs(Number(m[1]) - 81) <= 15, detect?.output);
+  check('bring-your-own: the log line names the explicit root', res.stderr.includes(`[xwe] model detection/acme-test v1 <- ${join(own, 'detection/acme-test/1/model.onnx')}`), res.stderr.split('\n')[0]);
+
+  // Pinned to a version that does not exist under the root: the miss names the pin.
+  for (const n of template.nodes) if (n.type === 'model.object_detection') n.data.config.model = 'acme-test@2';
+  writeFileSync(templateFile, JSON.stringify(template));
+  res = xwe(['run', templateFile, '--input', 'video=fixtures/video/drive.mp4', '--models-dir', own, '--out', outRoot, '--run-id', 'golden-acme-pin']);
+  check('a pinned version that is absent fails naming the pin', res.status === 1 && res.stderr.includes('model detection/acme-test@2 not found under') && res.stderr.includes('(run `xwe models pull detection/acme-test@2`, or pass --pull)'), res.stderr.trim().split('\n').slice(-2).join(' | '));
+
+  // checkModelDir from the library (ESM), fill off.
+  const lib = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { checkModelDir } from ${JSON.stringify(join(root, 'dist/esm/local/index.js'))};
+    const report = await checkModelDir(${JSON.stringify(dir)}, { fill: false });
+    console.log(JSON.stringify({ ok: report.ok, problems: report.problems, stages: report.lines.map((l) => l.stage), name: report.manifest?.name }));
+  `], { cwd: root, encoding: 'utf8' });
+  let out = null;
+  try { out = JSON.parse(lib.stdout.trim().split('\n').at(-1)); } catch { /* below */ }
+  check('checkModelDir (esm) returns { ok, problems } for the acme-test directory', out?.ok === true && Array.isArray(out.problems) && out.problems.length === 0 && out.stages.join(',') === 'manifest,model,session,output' && out.name === 'acme-test', lib.stderr.trim().split('\n').at(-1) || JSON.stringify(out));
 }
 
 if (!failed) rmSync(outRoot, { recursive: true, force: true });

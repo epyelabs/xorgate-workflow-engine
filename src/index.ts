@@ -91,8 +91,8 @@ export {
   runPrefix,
 } from './engine/manifest';
 export type { EngineResult, RunManifest } from './engine/manifest';
-export { MODEL_FAMILIES, modelManifestSchema } from './models/registry';
-export type { ModelManifest } from './models/registry';
+export { MODEL_FAMILIES, modelFileIntegritySchema, modelManifestSchema } from './models/registry';
+export type { ModelFileIntegrity, ModelManifest } from './models/registry';
 export {
   simEventPayloadSchema,
   simRecordPayloadSchema,
