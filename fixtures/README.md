@@ -5,6 +5,44 @@ us-east-1) on 2026-08-31, for the golden runs described in the plan
 (`xorgate/plans/portable_workflow_engine_architecture/`). Nothing here was
 written back to xorgate.
 
+## Pulled fixtures (not in git)
+
+The large fixtures, `video/drive.mp4` and `models/detection/yolov8n/1/`
+(`manifest.json` + `model.onnx`), are **not committed**. They are listed in
+[`fixtures.json`](./fixtures.json) with a URL, sha256 and size, and fetched by
+
+```
+npm run fixtures:pull        # verifies sha256 + size; a no-op when present
+```
+
+`npm test` and `npm run smoke` run the pull first, so a fresh clone needs no
+extra step beyond reaching the fixture source. The repository history was
+rewritten in the distribution plan's M3 to drop the blobs (`.gitignore` keeps
+them out; `fixtures/models/` and `fixtures/video/*.mp4` are ignored).
+
+Where they come from: `fixtures.json`'s `baseUrl`, with each entry's `url`
+under it. The objects live under a `fixtures/` prefix in the same layout as
+this directory, so a mirror is:
+
+```
+<baseUrl>/fixtures/video/drive.mp4
+<baseUrl>/fixtures/models/detection/yolov8n/1/manifest.json
+<baseUrl>/fixtures/models/detection/yolov8n/1/model.onnx
+```
+
+Until the public registry bucket exists, `baseUrl` is a local `file://`
+mirror on the maintainer's machine
+(`/Users/vynci/vynci/xorgate/engines/xwe-fixtures-mirror`, outside this
+repository); at release it becomes `https://models.xorgate.io`, where the
+same objects sit under `fixtures/`. `XWE_FIXTURES_URL` overrides `baseUrl`
+for any other mirror (`http(s):` or `file:`), for example a directory served
+with `node scripts/serve-static.mjs <mirror-dir> 3000` or `npx serve`.
+
+`fixtures/models` is a model registry root like any other: runs pass it with
+`--models-dir fixtures/models` (the golden suite does; it is no longer in the
+default search chain, which is the cache `XWE_MODELS_DIR` /
+`~/.xorgate/models` only).
+
 ## Templates (`templates/`)
 
 Published schemaVersion-2 definitions, verbatim from the dev DB
@@ -77,10 +115,13 @@ node scripts/fixtures/trim-video.mjs /tmp/00034.mp4 fixtures/video/drive.mp4 25 
 
 ## Model (`models/detection/yolov8n/1/`)
 
-`model.onnx` (12.85 MB) + `manifest.json`, verbatim from the dev S3 model
-registry. The directory layout mirrors the registry keys EXACTLY
+`model.onnx` (12.85 MB) + `manifest.json`, from the dev S3 model registry
+(pulled, see above). The directory layout mirrors the registry keys EXACTLY
 (`models/<family>/<name>/<version>/`, family `detection` — see
-`src/models/registry.ts`), per the plan's local-layout-mirrors-S3 rule:
+`src/models/registry.ts`), per the plan's local-layout-mirrors-S3 rule. The
+manifest carries the additive `files` block (`model.onnx` sha256
+`8d29aa6e…`, 12851122 bytes) that `xwe models check` filled in on 2026-09-04;
+the model bytes are the verbatim registry object:
 
 ```
 aws s3 cp s3://xorgate-core-dev-111910761410-us-east-1/models/detection/yolov8n/1/manifest.json fixtures/models/detection/yolov8n/1/manifest.json
@@ -107,6 +148,12 @@ source bindings:
 |---|---|---|
 | templates/*.json | < 5 KB each | yes |
 | telemetry/window.csv | ~7 KB (150 samples) | yes |
-| video/drive.mp4 | 3.0 MB (25 s trim) | yes |
-| models/detection/yolov8n/1/model.onnx | 12.85 MB | yes (under the ~25 MB line) |
-| models/detection/yolov8n/1/manifest.json | 1.7 KB | yes |
+| manifests/*.manifest.json | ~2 KB each | yes |
+| fixtures.json | < 2 KB | yes |
+| video/drive.mp4 | 3.0 MB (25 s trim) | **no**, pulled (sha256 `cffc2882…`) |
+| models/detection/yolov8n/1/model.onnx | 12.85 MB | **no**, pulled (sha256 `8d29aa6e…`) |
+| models/detection/yolov8n/1/manifest.json | 1.8 KB | **no**, pulled with the model (sha256 `117fc18b…`) |
+
+The whole committed `fixtures/` tree is under 40 KB. A second clip,
+`video/drive_2.mp4` (7 MB, never committed, no recorded provenance), was
+deleted on 2026-09-04 rather than added to `fixtures.json`.

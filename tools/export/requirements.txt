@@ -1,0 +1,11 @@
+# Export-time deps only; nothing here ships to a runtime target.
+# (Loosened in M4: the original onnxruntime/numpy pins had no Python 3.14
+# wheels; ranges keep the scripts runnable on current interpreters.)
+ultralytics>=8.2,<9
+onnx>=1.16
+onnxruntime>=1.24
+numpy>=1.26
+pillow>=10
+# Depth export (export_depth.py) only:
+torch>=2.9
+transformers>=4.45

@@ -3,3 +3,11 @@ dist/
 out/
 *.log
 .DS_Store
+
+# Large golden fixtures are pulled, never committed (fixtures/fixtures.json,
+# `npm run fixtures:pull`); history was rewritten to drop them (plan M3, Q6).
+fixtures/video/*.mp4
+fixtures/models/
+
+# Local registry mirror built by scripts/registry-sync.mjs for tests and docs
+registry-mirror/

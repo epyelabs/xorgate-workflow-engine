@@ -61,7 +61,7 @@ npx xwe validate fixtures/templates/overspeed.json
 npx xwe run fixtures/templates/overspeed.json \
     --input telemetry=fixtures/telemetry/window.csv --out ./out
 npx xwe run fixtures/templates/perimeter-person-detect.json \
-    --input video=fixtures/video/drive.mp4 --out ./out
+    --input video=fixtures/video/drive.mp4 --models-dir fixtures/models --out ./out
 ```
 
 - `validate` strict-parses a template against the catalog and prints the
@@ -73,9 +73,16 @@ npx xwe run fixtures/templates/perimeter-person-detect.json \
 - Bindings reuse the EXISTING kinds (zero executor edits): `video_local`
   for video files; `telemetry_csv` / `telemetry_materialized` with `s3Key`
   resolved as a local path for telemetry.
-- Models resolve from `--models-dir` roots first, then `./fixtures/models`,
-  then `~/.xorgate/models`, in the registry layout
-  (`<family>/<name>/<version>/{manifest.json,model.onnx}`). No network.
+- Models resolve from `--models-dir` roots first, then the cache
+  (`XWE_MODELS_DIR`, default `~/.xorgate/models`), then, only with `--pull`
+  or `XWE_MODELS_PULL=1`, the registry (`XWE_MODEL_REGISTRY`, default
+  `https://models.xorgate.io`), all in the registry layout
+  (`<family>/<name>/<version>/{manifest.json,model.onnx}`). `xwe models
+  list | pull | path | check` manage the cache and validate a model
+  directory; pulls verify the manifest's `files.sha256`. The checkout's
+  fixture model is a root like any other: `--models-dir fixtures/models`.
+- Large fixtures are pulled, not committed: `npm run fixtures:pull` (run by
+  `npm test`) fetches them per `fixtures/fixtures.json`.
 - Secrets: env `XORGATE_SECRET_<LOGICAL_NAME>` or `--secrets secrets.json`
   (`{ "anthropic-api-key": "..." }`); only graphs with connector/VLM nodes
   need any. `--progress json` emits NDJSON status/step/event lines on stdout.

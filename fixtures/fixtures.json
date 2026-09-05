@@ -1,0 +1,21 @@
+{
+  "$comment": "Large golden fixtures are pulled, never committed (design 3b). `npm run fixtures:pull` fetches every entry below into fixtures/, verifying sha256 and size; `npm test` and `npm run smoke` pull when missing. `url` is relative to `baseUrl`; XWE_FIXTURES_URL overrides `baseUrl`. Until the public registry bucket exists, `baseUrl` is a local file:// mirror (fixtures/README.md, 'Pulled fixtures'); at release it becomes https://models.xorgate.io, where the objects live under the same fixtures/ prefix.",
+  "baseUrl": "file:///Users/vynci/vynci/xorgate/engines/xwe-fixtures-mirror",
+  "files": {
+    "video/drive.mp4": {
+      "url": "fixtures/video/drive.mp4",
+      "sha256": "cffc2882d19b49964dcffcd5eb47b7fe4858939b5be4e1781340c225e7b12644",
+      "sizeBytes": 3120781
+    },
+    "models/detection/yolov8n/1/manifest.json": {
+      "url": "fixtures/models/detection/yolov8n/1/manifest.json",
+      "sha256": "117fc18bfb9961d3b41060fadb8455d20c0f9d24508a0f530f9b303ffd48c6bc",
+      "sizeBytes": 1828
+    },
+    "models/detection/yolov8n/1/model.onnx": {
+      "url": "fixtures/models/detection/yolov8n/1/model.onnx",
+      "sha256": "8d29aa6e6235b07c9504075f66a5538e9b42ab040123bcc3c0b5a810ab013b6e",
+      "sizeBytes": 12851122
+    }
+  }
+}

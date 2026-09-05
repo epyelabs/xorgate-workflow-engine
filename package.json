@@ -78,13 +78,14 @@
   ],
   "scripts": {
     "clean": "rm -rf dist",
+    "fixtures:pull": "node scripts/fixtures/pull.mjs",
     "build": "npm run clean && npm run build:esm && npm run build:cjs && node scripts/finalize-build.mjs",
     "build:esm": "tsc -p tsconfig.esm.json",
     "build:cjs": "tsc -p tsconfig.cjs.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepack": "npm run build",
-    "smoke": "npm run build && node scripts/smoke.mjs",
-    "test": "npm run build && node scripts/golden-test.mjs",
+    "smoke": "npm run fixtures:pull && npm run build && node scripts/smoke.mjs",
+    "test": "npm run fixtures:pull && npm run build && node scripts/golden-test.mjs",
     "verify:tarball": "node scripts/verify-tarball.mjs",
     "ci": "npm run typecheck && npm run smoke && npm test && npm run verify:tarball"
   },

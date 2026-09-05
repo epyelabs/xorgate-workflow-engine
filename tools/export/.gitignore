@@ -1,0 +1,6 @@
+# Export outputs go to a registry (scripts/registry-sync.mjs), never into git.
+out/
+.venv/
+*.pt
+*.onnx
+__pycache__/

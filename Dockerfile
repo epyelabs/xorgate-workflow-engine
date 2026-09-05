@@ -15,7 +15,8 @@
 # ffmpeg comes from apt (the executors spawn `ffmpeg`; FFMPEG_PATH is only for
 # dev machines). onnxruntime-node installs its prebuilt binding for the build
 # platform via npm. No model is baked in: models resolve from the mounted
-# workspace (./fixtures/models) or --models-dir.
+# workspace via --models-dir, the cache (mount a volume at /root/.xorgate/models),
+# or the registry with --pull.
 FROM node:20-slim AS build
 
 WORKDIR /build

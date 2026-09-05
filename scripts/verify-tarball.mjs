@@ -129,6 +129,8 @@ try {
   const forbidden = files.filter((p) => /^(fixtures|scripts|src|tools|out|docs|examples)\//.test(p) || p === 'Dockerfile' || /\.(onnx|mp4|ts)$/.test(p) && !/\.d\.ts$/.test(p));
   if (forbidden.length === 0) pass(`tarball has no fixtures/, scripts/, src/, tools/, Dockerfile, models or video (${files.length} files)`);
   else forbidden.forEach((p) => fail(`tarball contains ${p}`));
+  if (!files.some((p) => p.startsWith('tools/export/')) && !files.some((p) => /\.py$/.test(p))) pass('tarball has no tools/export (the Python export tools stay in the repository)');
+  else fail('tarball contains tools/export or a .py file');
   for (const entry of ['dist/esm/index.js', 'dist/cjs/index.js', 'dist/esm/local/index.js', 'dist/cjs/local/index.js', 'dist/esm/testing/index.js', 'dist/cjs/testing/index.js', 'dist/cjs/cli/index.js', 'dist/esm/index.d.ts', 'dist/cjs/index.d.ts', 'LICENSE', 'README.md', 'CHANGELOG.md']) {
     if (files.includes(entry)) pass(`${entry} is in the tarball`);
     else fail(`${entry} is advertised but not in the tarball`);
