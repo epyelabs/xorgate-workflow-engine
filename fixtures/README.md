@@ -30,13 +30,16 @@ this directory, so a mirror is:
 <baseUrl>/fixtures/models/detection/yolov8n/1/model.onnx
 ```
 
-Until the public registry bucket exists, `baseUrl` is a local `file://`
-mirror on the maintainer's machine
-(`/Users/vynci/vynci/xorgate/engines/xwe-fixtures-mirror`, outside this
-repository); at release it becomes `https://models.xorgate.io`, where the
-same objects sit under `fixtures/`. `XWE_FIXTURES_URL` overrides `baseUrl`
-for any other mirror (`http(s):` or `file:`), for example a directory served
-with `node scripts/serve-static.mjs <mirror-dir> 3000` or `npx serve`.
+`baseUrl` is the public model registry, `https://models.xorgate.io`, which
+serves the same objects under its `fixtures/` prefix (live since 2026-09-05;
+CloudFront in front of a private bucket in the production account, stack
+`xorgate-model-registry`). `XWE_FIXTURES_URL` overrides `baseUrl` for any
+other mirror (`http(s):` or `file:`), for example an air-gapped copy of the
+`fixtures/` prefix served with `node scripts/serve-static.mjs <mirror-dir>
+3100` or `npx serve`, or a plain directory as
+`file:///path/to/mirror`. The maintainer's local mirror at
+`/Users/vynci/vynci/xorgate/engines/xwe-fixtures-mirror` is what seeded the
+bucket.
 
 `fixtures/models` is a model registry root like any other: runs pass it with
 `--models-dir fixtures/models` (the golden suite does; it is no longer in the
