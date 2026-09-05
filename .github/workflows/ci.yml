@@ -1,0 +1,91 @@
+# The engine's regression gate on every push to main and every pull request:
+# typecheck, smoke (both module formats load, the catalog hash, no cloud SDK),
+# the golden suite (the CLI, the library, the conformance kit against the
+# local host, secret hygiene, log levels), and verify:tarball (the packed
+# artifact installed into fresh projects). Three platforms because ONNX
+# Runtime and ffmpeg are native: Linux x64, Linux arm64, macOS arm64.
+#
+# Network: `npm ci` (ffmpeg-static downloads its binary), the fixtures pull
+# from https://models.xorgate.io (cached by fixtures.json hash), and
+# verify:tarball's `npm install` of the optional dependencies.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Node 20 is the floor `engines` promises; 22 is what most consumers run.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        node: [20]
+        include:
+          - os: ubuntu-latest
+            node: 22
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # The two large golden fixtures (the video and the model) are pulled,
+      # not committed; keep them between runs keyed on their pinned checksums.
+      - name: Cache the pulled fixtures
+        uses: actions/cache@v4
+        with:
+          path: |
+            fixtures/video/drive.mp4
+            fixtures/models
+          key: fixtures-${{ hashFiles('fixtures/fixtures.json') }}
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run smoke
+      - run: npm test
+      - run: npm run verify:tarball
+
+  image:
+    # The Dockerfile still builds and the image still runs the hermetic
+    # golden graph. Native architecture only and no push; the release
+    # workflow builds and pushes the multi-arch image.
+    name: image (linux/amd64, no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: xwe:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: xwe doctor inside the image
+        run: docker run --rm xwe:ci doctor
+      - name: The overspeed golden graph inside the image
+        run: |
+          docker run --rm -v "$PWD":/work xwe:ci run fixtures/templates/overspeed.json \
+            --input telemetry=fixtures/telemetry/window.csv --out out --run-id ci
+          node -e '
+            const r = require("./out/ci/result.json");
+            if (r.status !== "succeeded" || r.events.length !== 1 || r.events[0].occurredAt !== "2026-08-12T23:56:01.289Z") {
+              console.error("unexpected result", JSON.stringify(r)); process.exit(1);
+            }
+            console.log("ok: 1 overspeed event at", r.events[0].occurredAt);
+          '

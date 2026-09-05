@@ -16,6 +16,8 @@ import type {
 } from '../catalog/types';
 import { resolvePort } from '../validate';
 import { BoundedChannel } from './channel';
+import type { MessageLevel } from './log';
+import { createRedactor } from './redact';
 
 /**
  * The streaming graph engine core (architecture.md §4.1). One process per run:
@@ -63,7 +65,13 @@ export interface EngineRunDeps {
   channelCapacity?: number;
   /** Wall-clock budget; on expiry everything is cancelled and the run fails. */
   deadlineMs?: number;
-  log?: (message: string) => void;
+  /**
+   * Diagnostics with their level: `info` for executors' `ctx.log` lines and
+   * the deadline notice, `debug` for the engine's own trace (graph wiring,
+   * per-node timings). A one-argument function still works; it sees `info`
+   * and `debug` alike. Every message is scrubbed of secret values first.
+   */
+  log?: (message: string, level: MessageLevel) => void;
   /** The node registry to run against (default: the core catalog). */
   catalog?: Catalog;
 }
@@ -149,7 +157,14 @@ function failedOutcome(spec: EngineGraphSpec, failedNodeId: string | null, error
 
 export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Promise<EngineRunOutcome> {
   const def = spec.definition;
-  const log = deps.log ?? ((m: string) => console.log(`engine[${spec.runId}]: ${m}`));
+  // Secret hygiene: values read through the secrets seam are scrubbed from
+  // every string that leaves this function (summaries, errors, events,
+  // captures, progress messages, log lines). See ./redact.ts.
+  const redactor = createRedactor();
+  const rawLog = deps.log ?? ((m: string) => console.log(`engine[${spec.runId}]: ${m}`));
+  const log = (m: string, level: MessageLevel = 'info'): void => rawLog(redactor.text(m), level);
+  const secrets = deps.secrets ? redactor.wrapSecrets(deps.secrets) : undefined;
+  const progress = deps.progress ? redactor.wrapProgress(deps.progress) : undefined;
   const capacity = deps.channelCapacity ?? DEFAULT_CHANNEL_CAPACITY;
   const catalog = deps.catalog ?? coreCatalog;
 
@@ -163,6 +178,7 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
   }
   const order = topoSort(def);
   if (!order) return failedOutcome(spec, null, 'Workflow graph contains a cycle');
+  log(`graph: ${def.nodes.length} node(s), ${def.edges.length} edge(s), order ${order.join(' -> ')}`, 'debug');
 
   const nodesById = new Map(def.nodes.map((n) => [n.id, n]));
   const orderIndex = new Map(order.map((id, i) => [id, i]));
@@ -277,8 +293,8 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
     // Tee json-channel messages (detections, speed limits) to the progress
     // sink so the simulator's client-side overlay gets them live. Fire-and-
     // forget: the sink queues internally and must never slow the graph.
-    if (msg.ch === 'json' && deps.progress?.record) {
-      deps.progress.record({ nodeId, port: portId, tag: msg.tag, ts: msg.ts, seq: msg.seq, payload: msg.payload });
+    if (msg.ch === 'json' && progress?.record) {
+      progress.record({ nodeId, port: portId, tag: msg.tag, ts: msg.ts, seq: msg.seq, payload: msg.payload });
     }
     const channels = outChannelsByNode.get(nodeId)?.get(portId);
     if (!channels || channels.length === 0) return; // unconnected output: drop
@@ -314,7 +330,7 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
         emitEvent: (event) => {
           if (!state.aborted) {
             events.push(event);
-            deps.progress?.event(event);
+            progress?.event(event);
           }
         },
         captureRecord: (record) => {
@@ -323,7 +339,7 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
         setSummary: (summary) => {
           state.summary = summary;
         },
-        secrets: deps.secrets ?? null,
+        secrets: secrets ?? null,
         http: deps.httpFetch ?? fetch,
         log: (message) => log(`${nodeId}: ${message}`),
       };
@@ -363,7 +379,8 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
       for (const channels of outChannelsByNode.get(nodeId)?.values() ?? []) {
         for (const c of channels) c.close();
       }
-      deps.progress?.step(stepFor(nodeId));
+      log(`${nodeId}: ${state.status} in ${state.durationMs} ms, ${state.emitted} message(s)`, 'debug');
+      progress?.step(stepFor(nodeId));
     }
   };
 
@@ -390,7 +407,7 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
 
   const okSteps = steps.filter((s) => s.status === 'ok').length;
   const failed = firstFailure as { nodeId: string; error: string } | null;
-  return {
+  return redactor.deep({
     status: failed || timedOut ? 'failed' : 'succeeded',
     error: failed ? failed.error : timedOut ? 'Run exceeded its max runtime' : null,
     failedNodeId: failed ? failed.nodeId : null,
@@ -398,5 +415,5 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
     events,
     captures,
     metrics: { nodes: def.nodes.length, okSteps, events: events.length, messages: messagesTotal },
-  };
+  });
 }

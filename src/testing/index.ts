@@ -1,28 +1,8 @@
-import type { EngineHost } from '../host';
-
 /**
- * `@xorgate/workflow-engine/testing`: the conformance kit. The entry point
- * exists so hosts can wire it up; the runner itself ships with the
- * production-hardening milestone.
+ * `@xorgate/workflow-engine/testing`: the conformance kit. Runs the engine's
+ * four golden expectations through `createEngine` against any host, so a
+ * host over object storage, a vault and a message bus can prove it produces
+ * the outcomes the reference host produces.
  */
-
-export interface ConformanceOptions {
-  host: EngineHost;
-  /** The engine's golden fixtures directory (templates, telemetry, video, models). */
-  fixturesDir: string;
-}
-
-export interface ConformanceCase {
-  name: 'overspeed' | 'detection' | 'visualization' | 'missing-input';
-  ok: boolean;
-  detail: string;
-}
-
-export interface ConformanceReport {
-  ok: boolean;
-  cases: ConformanceCase[];
-}
-
-export async function runConformance(_options: ConformanceOptions): Promise<ConformanceReport> {
-  throw new Error('runConformance is not implemented until M5');
-}
+export { runConformance, CONFORMANCE_CASE_NAMES, CONFORMANCE_EXPECTATIONS } from './conformance';
+export type { ConformanceCase, ConformanceCaseName, ConformanceOptions, ConformanceReport } from './conformance';

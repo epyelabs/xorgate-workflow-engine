@@ -12,6 +12,7 @@ import type {
 } from '../catalog/types';
 import type { ModelManifest } from '../models/registry';
 import type { EngineRunOutcome } from '../engine/index';
+import { scrubSecretEnv } from '../engine/child-env';
 import { buildEngineResult, type EngineResult } from '../engine/manifest';
 import { lazyRequire } from '../engine/lazy-require';
 import { parseModelName } from './model-ref';
@@ -286,7 +287,7 @@ export function teeProgress(
  */
 export function resolveFfmpeg(env: NodeJS.ProcessEnv = process.env): string | null {
   if (env.FFMPEG_PATH) return env.FFMPEG_PATH;
-  const onPath = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' });
+  const onPath = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore', env: scrubSecretEnv(env) });
   if (!onPath.error && onPath.status === 0) return 'ffmpeg';
   try {
     const ffmpegStatic = lazyRequire<string | null>('ffmpeg-static');

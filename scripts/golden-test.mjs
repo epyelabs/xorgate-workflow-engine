@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, existsSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -502,6 +503,189 @@ function serveDir(dir) {
     check(`packs (${fmt}): core minus core/model composes 22 nodes with a different core hash and no detection node`,
       out?.minusModel?.nodes === 22 && out.minusModel.hasDetection === false && out.minusModel.packs?.length === 1 && out.minusModel.packs[0].name === 'core' && out.minusModel.packs[0].hash !== 'e481243f5ffe4678', JSON.stringify(out?.minusModel));
   }
+}
+
+// --- the conformance kit (./testing): the four golden expectations through createEngine --
+// `runConformance` against localHost in both module formats; a host missing the
+// model and artifact seams fails the two media cases and nothing else; bad
+// options reject with XweUsageError before anything runs.
+const CONF_BODY = (imports) => `
+  ${imports}
+  const hostOpts = { modelDirs: ['fixtures/models'], outDir: ${JSON.stringify(outRoot)}, baseDir: ${JSON.stringify(root)} };
+  const report = await runConformance({ host: localHost(hostOpts), fixturesDir: ${JSON.stringify(join(root, 'fixtures'))}, runIdPrefix: 'golden-conformance-' + FMT, log: (l) => console.error(l) });
+  const local = localHost(hostOpts);
+  const seamless = { bind: async (a) => { const b = await local.bind(a); const { artifacts, ...rest } = b; const { fetchModel, ...sources } = b.sources; return { ...rest, sources }; } };
+  const bad = await runConformance({ host: seamless, fixturesDir: 'fixtures', runIdPrefix: 'golden-conformance-bad-' + FMT, cases: ['overspeed', 'detection'] });
+  let usage = null; try { await runConformance({ fixturesDir: 'fixtures' }); } catch (e) { usage = { name: e.name, exitCode: e.exitCode }; }
+  let missingDir = null; try { await runConformance({ host: local, fixturesDir: ${JSON.stringify(join(outRoot, 'nowhere'))} }); } catch (e) { missingDir = e.message; }
+  console.log(JSON.stringify({ ok: report.ok, names: CONFORMANCE_CASE_NAMES, cases: report.cases.map((c) => ({ name: c.name, ok: c.ok, detail: c.detail, runDir: c.runDir, durationMs: c.durationMs })), badOk: bad.ok, bad: bad.cases.map((c) => [c.name, c.ok, c.detail]), usage, missingDir }));
+`;
+for (const [fmt, argv, imports] of [
+  ['esm', ['--input-type=module', '-e'], `const FMT = 'esm';
+   import { runConformance, CONFORMANCE_CASE_NAMES } from ${JSON.stringify(join(root, 'dist/esm/testing/index.js'))};
+   import { localHost } from ${JSON.stringify(join(root, 'dist/esm/local/index.js'))};`],
+  ['cjs', ['-e'], `const FMT = 'cjs';
+   const { runConformance, CONFORMANCE_CASE_NAMES } = require(${JSON.stringify(join(root, 'dist/cjs/testing/index.js'))});
+   const { localHost } = require(${JSON.stringify(join(root, 'dist/cjs/local/index.js'))});
+   (async () => {`],
+]) {
+  const body = fmt === 'cjs' ? `${CONF_BODY(imports)}\n})().catch((e) => { console.error(e); process.exit(9); });` : CONF_BODY(imports);
+  const started = Date.now();
+  const res = spawnSync(process.execPath, [...argv, body], { cwd: root, encoding: 'utf8' });
+  let out = null;
+  try { out = JSON.parse(res.stdout.trim().split('\n').at(-1)); } catch { /* reported below */ }
+  console.log(`     (conformance ${fmt} wall time: ${((Date.now() - started) / 1000).toFixed(1)}s)`);
+  check(`conformance (${fmt}) script runs`, res.status === 0 && out !== null, res.stderr.trim().split('\n').slice(-3).join(' | '));
+  const byName = Object.fromEntries((out?.cases ?? []).map((c) => [c.name, c]));
+  check(`conformance (${fmt}): runConformance against localHost reports ok with the four cases in order`,
+    out?.ok === true && JSON.stringify(out?.names) === JSON.stringify(['overspeed', 'detection', 'visualization', 'missing-input']) && out?.cases?.map((c) => c.name).join(',') === 'overspeed,detection,visualization,missing-input' && out.cases.every((c) => c.ok === true), JSON.stringify(out?.cases?.map((c) => [c.name, c.ok])));
+  check(`conformance (${fmt}): overspeed = 1 event at the pinned timestamp, in the host's run directory`,
+    byName.overspeed?.detail === '1 overspeed event at 2026-08-12T23:56:01.289Z, observed 77.7 km/h, 4 ok steps' && byName.overspeed?.runDir === join(outRoot, `golden-conformance-${fmt}-overspeed`), byName.overspeed?.detail);
+  check(`conformance (${fmt}): detection = 50 frames, 81 ± 15 detections`, /^50 frames, \d+ detections \(81 ± 15\), 0 events$/.test(byName.detection?.detail ?? ''), byName.detection?.detail);
+  check(`conformance (${fmt}): visualization = 50 annotated frames to the sink and an MP4 that decodes to 50 frames`,
+    byName.visualization?.detail === '50 annotated frames, 50 reached the artifact sink, video/viz.mp4 decodes to 50 h264 frames at 2 fps', byName.visualization?.detail);
+  check(`conformance (${fmt}): missing-input = failed at n1 with result.json written`,
+    /^failed at n1 \(ENOENT: .*does-not-exist\.csv'\), result\.json on disk with status failed$/.test(byName['missing-input']?.detail ?? ''), byName['missing-input']?.detail);
+  check(`conformance (${fmt}): a host without fetchModel and artifacts fails only the media case, naming the seam`,
+    out?.badOk === false && JSON.stringify(out?.bad?.map((c) => [c[0], c[1]])) === JSON.stringify([['overspeed', true], ['detection', false]]) && out.bad[1][2] === 'status failed at n3: This engine target cannot load registry models (no media support)', JSON.stringify(out?.bad));
+  check(`conformance (${fmt}): no host, or a fixtures directory without the templates, rejects with XweUsageError (exit code 2)`,
+    out?.usage?.name === 'XweUsageError' && out?.usage?.exitCode === 2 && /nowhere\/templates\/overspeed\.json is missing/.test(out?.missingDir ?? ''), `${JSON.stringify(out?.usage)} ${out?.missingDir}`);
+}
+
+// --- secret hygiene: a fake XORGATE_SECRET_* appears in no artifact and no output line --
+// The OSM connector template with httpFetch mocked (five samples: Overpass
+// etiquette throttles lookups to ~1/s), then two providers that put the key
+// into a failure (a 401 body echoing the request URL; an HTTP layer whose
+// error carries the URL and the key): every artifact, NDJSON line and stderr
+// line must be free of the value, and the failures must carry `[redacted]`.
+{
+  const FAKE = 'sk-fake-LEAK-0123456789abcdef';
+  const hygRoot = join(outRoot, 'hygiene');
+  mkdirSync(hygRoot, { recursive: true });
+  const shortCsv = join(hygRoot, 'window-5.csv');
+  writeFileSync(shortCsv, readFileSync(join(root, 'fixtures/telemetry/window.csv'), 'utf8').split('\n').slice(0, 6).join('\n') + '\n');
+  const script = `
+    import { readFileSync } from 'node:fs';
+    import { createEngine } from ${JSON.stringify(join(root, 'dist/esm/index.js'))};
+    import { localHost, ndjsonProgress } from ${JSON.stringify(join(root, 'dist/esm/local/index.js'))};
+    const FAKE = process.env.XORGATE_SECRET_HERE_API_KEY;
+    const osm = JSON.parse(readFileSync(${JSON.stringify(join(root, 'fixtures/templates/overspeed-osm.json'))}, 'utf8'));
+    const here = structuredClone(osm);
+    for (const n of here.nodes) if (n.type === 'connector.third_party') n.data.config.provider = 'here';
+    const mocks = {
+      osm: async () => new Response(JSON.stringify({ elements: [{ tags: { maxspeed: '60' } }] }), { status: 200 }),
+      'here-401': async (url) => new Response(JSON.stringify({ error: 'invalid apikey', request: String(url) }), { status: 401 }),
+      'here-throw': async (url) => { throw new Error('connect failed for ' + String(url) + ' (key ' + FAKE + ')'); },
+    };
+    const results = {};
+    for (const [mode, mock] of Object.entries(mocks)) {
+      const local = localHost({ outDir: ${JSON.stringify(hygRoot)}, baseDir: ${JSON.stringify(root)}, progress: ndjsonProgress((l) => console.log(l)) });
+      const host = { bind: async (a) => ({ ...(await local.bind(a)), httpFetch: mock }) };
+      const run = await createEngine({ host, log: 'debug' }).run({ template: mode === 'osm' ? osm : here, inputs: { telemetry: ${JSON.stringify(shortCsv)} }, runId: 'golden-hygiene-' + mode });
+      results[mode] = { status: run.result.status, error: run.result.error, roads: run.result.steps.find((s) => s.nodeId === 'roads')?.output, records: run.result.artifacts.outputs.cap?.count ?? 0 };
+    }
+    console.log('RESULT ' + JSON.stringify(results));
+  `;
+  const started = Date.now();
+  const res = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: root, encoding: 'utf8', env: { ...process.env, XORGATE_SECRET_HERE_API_KEY: FAKE, XORGATE_SECRET_GOOGLE_ROADS_API_KEY: `${FAKE}-google` } });
+  console.log(`     (hygiene wall time: ${((Date.now() - started) / 1000).toFixed(1)}s)`);
+  let hyg = null;
+  try { hyg = JSON.parse(res.stdout.split('\n').find((l) => l.startsWith('RESULT ')).slice(7)); } catch { /* reported below */ }
+  check('hygiene: the OSM connector template runs with httpFetch mocked and a fake XORGATE_SECRET_* in the environment', res.status === 0 && hyg?.osm?.status === 'succeeded' && /^5 speed-limit record\(s\) via osm, 5 lookup\(s\)$/.test(hyg.osm.roads ?? '') && hyg.osm.records === 5, hyg ? JSON.stringify(hyg.osm) : res.stderr.trim().split('\n').slice(-3).join(' | '));
+  check('hygiene: a provider that echoes the request URL in a 401 body fails the step with the key redacted', hyg?.['here-401']?.status === 'failed' && hyg['here-401'].error.startsWith('HERE rejected the API key (HTTP 401)') && hyg['here-401'].error.includes('apikey=[redacted]') && !hyg['here-401'].error.includes(FAKE), hyg?.['here-401']?.error);
+  check('hygiene: an HTTP layer whose error carries the URL and the key is redacted too (both forms)', hyg?.['here-throw']?.status === 'failed' && hyg['here-throw'].error.includes('apikey=[redacted]') && hyg['here-throw'].error.includes('(key [redacted])') && !hyg['here-throw'].error.includes(FAKE), hyg?.['here-throw']?.error);
+  const artifactFiles = [];
+  (function walk(dir) { for (const e of readdirSync(dir, { withFileTypes: true })) { const p = join(dir, e.name); if (e.isDirectory()) walk(p); else if (/\.(json|jsonl|csv|txt)$/.test(e.name)) artifactFiles.push(p); } })(hygRoot);
+  const leaks = artifactFiles.filter((f) => readFileSync(f, 'utf8').includes(FAKE));
+  check('hygiene: the fake secret appears in no artifact (result.json, events.jsonl, outputs/**) of the three runs', leaks.length === 0 && artifactFiles.filter((f) => f.endsWith('result.json')).length === 3, leaks.join(', ') || `${artifactFiles.length} files scanned`);
+  check('hygiene: the fake secret appears in no stdout (NDJSON) or stderr line; the redacted text does', !res.stdout.includes(FAKE) && !res.stderr.includes(FAKE) && res.stdout.includes('"t":"status"') && res.stdout.includes('apikey=[redacted]') && res.stderr.includes('[engine] run golden-hygiene-osm:'), `${res.stdout.split('\n').length} stdout lines, ${res.stderr.split('\n').length} stderr lines`);
+  console.log(`     (grep -R "${FAKE}" ${hygRoot} -> ${leaks.length === 0 ? 'no leak' : 'LEAK'})`);
+
+  // The CLI with the same fake secret in its environment.
+  const env = { XORGATE_SECRET_HERE_API_KEY: FAKE };
+  let r = xwe(['run', 'fixtures/templates/overspeed.json', '--input', 'telemetry=fixtures/telemetry/window.csv', '--out', hygRoot, '--run-id', 'golden-hygiene-cli', '--progress', 'json', '--log-level', 'debug'], env);
+  check('hygiene (cli): a run with the fake secret in the environment prints it nowhere (NDJSON, debug stderr, artifacts)', r.status === 0 && !r.stdout.includes(FAKE) && !r.stderr.includes(FAKE) && r.stdout.includes('"t":"event"') && !readFileSync(join(hygRoot, 'golden-hygiene-cli/result.json'), 'utf8').includes(FAKE), r.stderr.trim().split('\n').at(-1));
+
+  // Child processes: an ffmpeg wrapper dumps its environment before running the real one.
+  const ffmpegStatic = createRequire(import.meta.url)('ffmpeg-static');
+  const probe = join(hygRoot, 'ffmpeg-probe.sh');
+  const dump = join(hygRoot, 'ffmpeg-env.txt');
+  writeFileSync(probe, `#!/bin/sh\nenv >> "$XWE_TEST_ENV_DUMP"\nexec ${JSON.stringify(ffmpegStatic)} "$@"\n`, { mode: 0o755 });
+  r = xwe(['run', 'fixtures/templates/perimeter-visualize.json', '--input', 'video=fixtures/video/drive.mp4', ...MODELS_DIR, '--out', hygRoot, '--run-id', 'golden-hygiene-ffmpeg', '--emit-video'], { ...env, FFMPEG_PATH: probe, XWE_TEST_ENV_DUMP: dump });
+  const dumped = existsSync(dump) ? readFileSync(dump, 'utf8') : '';
+  const spawns = (dumped.match(/^XWE_TEST_ENV_DUMP=/gm) ?? []).length;
+  check('hygiene (cli): every ffmpeg child (decode, mux) inherits PATH but no XORGATE_SECRET_* variable', r.status === 0 && spawns >= 2 && (dumped.match(/^PATH=/gm) ?? []).length === spawns && !dumped.includes('XORGATE_SECRET_') && !dumped.includes(FAKE) && existsSync(join(hygRoot, 'golden-hygiene-ffmpeg/video/viz.mp4')), `${spawns} ffmpeg spawn(s) captured; ${r.stderr.trim().split('\n').at(-1)}`);
+
+  // --secrets files: errors name the file, never its contents.
+  const badSecrets = join(hygRoot, 'secrets-bad.json');
+  writeFileSync(badSecrets, `{ "here-api-key": "${FAKE}" `);
+  r = xwe(['run', 'fixtures/templates/overspeed.json', '--input', 'telemetry=fixtures/telemetry/window.csv', '--out', hygRoot, '--run-id', 'golden-hygiene-badsecrets', '--secrets', badSecrets]);
+  check('hygiene (cli): a --secrets file that is not JSON exits 2 naming the file, not its contents, and runs nothing', r.status === 2 && r.stderr.trim() === `xwe: --secrets ${badSecrets}: not valid JSON (expected { "<logical-name>": "<value>" })` && !existsSync(join(hygRoot, 'golden-hygiene-badsecrets')), r.stderr.trim());
+  writeFileSync(join(hygRoot, 'secrets-arr.json'), '["x"]');
+  r = xwe(['run', 'fixtures/templates/overspeed.json', '--input', 'telemetry=fixtures/telemetry/window.csv', '--out', hygRoot, '--secrets', join(hygRoot, 'secrets-arr.json')]);
+  check('hygiene (cli): a --secrets file that is not an object of strings exits 2', r.status === 2 && r.stderr.includes('expected a JSON object of { "<logical-name>": "<value>" }'), r.stderr.trim());
+  writeFileSync(join(hygRoot, 'secrets-num.json'), `{ "here-api-key": 5 }`);
+  r = xwe(['run', 'fixtures/templates/overspeed.json', '--input', 'telemetry=fixtures/telemetry/window.csv', '--out', hygRoot, '--secrets', join(hygRoot, 'secrets-num.json')]);
+  check('hygiene (cli): a non-string secret value exits 2 naming the logical name only', r.status === 2 && r.stderr.includes('the value of "here-api-key" must be a string') && !r.stderr.includes('5 }'), r.stderr.trim());
+  r = xwe(['run', 'fixtures/templates/overspeed.json', '--input', 'telemetry=fixtures/telemetry/window.csv', '--out', hygRoot, '--secrets', join(hygRoot, 'secrets-missing.json')]);
+  check('hygiene (cli): a missing --secrets file exits 2 with the errno, not a stack', r.status === 2 && r.stderr.trim() === `xwe: --secrets ${join(hygRoot, 'secrets-missing.json')}: cannot read it (ENOENT)`, r.stderr.trim());
+  writeFileSync(join(hygRoot, 'secrets-ok.json'), JSON.stringify({ 'here-api-key': FAKE }));
+  r = xwe(['run', 'fixtures/templates/overspeed.json', '--input', 'telemetry=fixtures/telemetry/window.csv', '--out', hygRoot, '--run-id', 'golden-hygiene-secretsfile', '--secrets', join(hygRoot, 'secrets-ok.json'), '--log-level', 'debug']);
+  check('hygiene (cli): a valid --secrets file runs the graph and its values print nowhere', r.status === 0 && !r.stderr.includes(FAKE) && !readFileSync(join(hygRoot, 'golden-hygiene-secretsfile/result.json'), 'utf8').includes(FAKE), r.stderr.trim().split('\n').at(-1));
+
+  // A registry URL carrying credentials is refused by name; the value is never printed.
+  const credEnv = { XWE_MODEL_REGISTRY: 'https://user:tok-SECRET-VALUE@127.0.0.1:9/' };
+  r = xwe(['models', 'list'], credEnv);
+  check('hygiene (cli): XWE_MODEL_REGISTRY with credentials is refused naming the variable, never the value', r.status === 2 && r.stderr.trim() === 'xwe: XWE_MODEL_REGISTRY must not carry credentials (user:password@host); point it at a registry or mirror that needs none' && !r.stdout.includes('tok-SECRET-VALUE'), r.stderr.trim());
+  r = xwe(['doctor'], credEnv);
+  check('hygiene (cli): doctor reports a credentialed registry URL as not usable without printing it', r.stdout.includes('  registry          not usable: XWE_MODEL_REGISTRY must not carry credentials') && !r.stdout.includes('tok-SECRET-VALUE'), r.stdout.split('\n').find((l) => l.startsWith('  registry')));
+}
+
+// --- --log-level on the CLI and createEngine({ log }) in the library ------------
+{
+  const args = ['run', 'fixtures/templates/overspeed.json', '--input', 'telemetry=fixtures/telemetry/window.csv', '--out', outRoot];
+  const failing = ['run', 'fixtures/templates/overspeed.json', '--input', 'telemetry=missing.csv', '--out', outRoot];
+  let r = xwe([...args, '--run-id', 'golden-log-silent', '--log-level', 'silent']);
+  check('--log-level silent: a successful run prints nothing on stderr, exits 0, writes result.json', r.status === 0 && r.stderr === '' && r.stdout === '' && existsSync(join(outRoot, 'golden-log-silent/result.json')), r.stderr.trim());
+  r = xwe([...failing, '--run-id', 'golden-log-silent-fail', '--log-level=silent']);
+  check('--log-level=silent: a failed run prints nothing and still exits 1 with result.json written', r.status === 1 && r.stderr === '' && readJson(join(outRoot, 'golden-log-silent-fail/result.json')).status === 'failed', r.stderr.trim());
+  r = xwe([...args, '--run-id', 'golden-log-error', '--log-level', 'error']);
+  check('--log-level error: a successful run prints nothing', r.status === 0 && r.stderr === '', r.stderr.trim());
+  r = xwe([...failing, '--run-id', 'golden-log-error-fail', '--log-level', 'error']);
+  check('--log-level error: a failed run prints only the xwe: failure line', r.status === 1 && r.stderr.trim().split('\n').length === 1 && r.stderr.startsWith('xwe: run failed at node n1: ENOENT'), r.stderr.trim());
+  r = xwe([...args, '--run-id', 'golden-log-info']);
+  check('the default level (info) prints the run line, the step rows and the event count, and no engine trace', r.status === 0 && /^\[xwe\] succeeded in \d+\.\ds -> /.test(r.stderr) && r.stderr.includes('  ok      n1           150 samples') && r.stderr.trim().endsWith('events: 1') && !r.stderr.includes('[engine]'), r.stderr.trim().split('\n')[0]);
+  r = xwe([...args, '--run-id', 'golden-log-debug', '--log-level', 'debug']);
+  check('--log-level debug adds the [engine] trace: bindings, graph order, per-node timings, the run total', r.status === 0 && r.stderr.includes('[engine] run golden-log-debug: 4 node(s), bindings n1=telemetry_csv') && r.stderr.includes(`[engine] run golden-log-debug: artifacts -> ${join(outRoot, 'golden-log-debug')}`) && r.stderr.includes('[engine] graph: 4 node(s), 3 edge(s), order n1 -> n2 -> n3 -> n4') && /\[engine\] n3: ok in \d+ ms, 149 message\(s\)/.test(r.stderr) && /\[engine\] run golden-log-debug: succeeded in \d+ ms/.test(r.stderr) && r.stderr.includes('  events: 1'), r.stderr.trim().split('\n').slice(0, 3).join(' | '));
+  r = xwe([...args, '--run-id', 'golden-log-ndjson', '--progress', 'json', '--log-level', 'debug']);
+  check('--log-level never touches stdout: --progress json stays pure NDJSON at debug', r.status === 0 && r.stdout.trim().split('\n').every((l) => l.startsWith('{"at":') && typeof JSON.parse(l).t === 'string') && r.stderr.includes('[engine] graph:'), r.stdout.split('\n')[0]);
+  r = xwe([...args, '--log-level', 'loud']);
+  check('an unknown --log-level exits 2 naming the four levels', r.status === 2 && r.stderr.trim() === 'xwe: --log-level must be one of silent, error, info, debug, got "loud"', r.stderr.trim());
+  r = xwe(['validate', 'examples/packs/acme-scale/overspeed-scaled.json', '--log-level', 'silent']);
+  check('--log-level applies to every command: a silent invalid validate prints nothing and exits 1', r.status === 1 && r.stderr === '' && r.stdout === '', r.stderr.trim());
+  r = xwe(['--log-level', 'silent', 'validate', 'fixtures/templates/overspeed.json']);
+  check('--log-level may come before the command; validate keeps its stdout report', r.status === 0 && r.stdout.startsWith('OK: 4 nodes, 3 edges'), r.stdout.trim().split('\n')[0]);
+  r = xwe(['doctor', '--log-level', 'silent']);
+  check('doctor keeps its stdout report under --log-level silent', /^xwe \S+ \(node /.test(r.stdout), r.stdout.split('\n')[0]);
+
+  const lib = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { createEngine, XweUsageError, LOG_LEVELS } from ${JSON.stringify(join(root, 'dist/esm/index.js'))};
+    import { localHost } from ${JSON.stringify(join(root, 'dist/esm/local/index.js'))};
+    const host = localHost({ outDir: ${JSON.stringify(outRoot)}, baseDir: ${JSON.stringify(root)}, log: () => {} });
+    const run = (engine, id) => engine.run({ template: 'fixtures/templates/overspeed.json', inputs: { telemetry: 'fixtures/telemetry/window.csv' }, runId: id });
+    const seen = [];
+    await run(createEngine({ host, log: (m, level) => seen.push(level + ' ' + m) }), 'golden-log-lib-fn');
+    await run(createEngine({ host, log: 'debug' }), 'golden-log-lib-debug');
+    await run(createEngine({ host, log: 'error' }), 'golden-log-lib-error');
+    await run(createEngine({ host }), 'golden-log-lib-default');
+    let bad = null; try { createEngine({ host, log: 'loud' }); } catch (e) { bad = e instanceof XweUsageError && e.message; }
+    console.log(JSON.stringify({ seen, bad, levels: LOG_LEVELS }));
+  `], { cwd: root, encoding: 'utf8' });
+  let out = null;
+  try { out = JSON.parse(lib.stdout.trim().split('\n').at(-1)); } catch { /* below */ }
+  check('createEngine({ log: fn }) receives every engine message with its level (debug trace included)', lib.status === 0 && Array.isArray(out?.seen) && out.seen.includes('debug graph: 4 node(s), 3 edge(s), order n1 -> n2 -> n3 -> n4') && out.seen.some((l) => /^debug n1: ok in \d+ ms, 150 message\(s\)$/.test(l)) && out.seen.every((l) => /^(debug|info|error) /.test(l)), lib.stderr.trim().split('\n').at(-1) || JSON.stringify(out?.seen?.slice(0, 2)));
+  check('createEngine({ log: "debug" }) writes [engine] lines on stderr; "error" and the silent default write nothing', lib.stderr.includes('[engine] run golden-log-lib-debug: 4 node(s), bindings n1=telemetry_csv') && lib.stderr.includes('[engine] graph:') && !lib.stderr.includes('golden-log-lib-error') && !lib.stderr.includes('golden-log-lib-default') && !lib.stderr.includes('golden-log-lib-fn'), lib.stderr.trim().split('\n').slice(0, 2).join(' | '));
+  check('createEngine({ log: "loud" }) is a usage error naming the levels; LOG_LEVELS is exported', out?.bad === 'createEngine: log must be a function or one of silent, error, info, debug' && JSON.stringify(out?.levels) === JSON.stringify(['silent', 'error', 'info', 'debug']), String(out?.bad));
 }
 
 if (!failed) rmSync(outRoot, { recursive: true, force: true });

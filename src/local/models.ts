@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
+import { displayUrl } from '../engine/redact';
 import { modelManifestSchema, type ModelManifest } from '../models/registry';
 import { formatModelRef, parseModelName, type ModelRef } from './model-ref';
 import { displayPath } from './paths';
@@ -92,7 +93,7 @@ export function httpResolver(registryUrl: string, cacheDir: string): ModelResolv
       const pulled = await pullModel({ registryUrl, cacheDir, ref, log: ctx.log });
       if (!pulled.alreadyCached) {
         ctx.log(
-          `pulled ${formatModelRef(pulled.ref)} from ${registryUrl} -> ${pulled.dir} (model.onnx ${formatBytes(pulled.sizeBytes)}, ${pulled.integrity === 'verified' ? 'sha256 verified' : 'no checksum in manifest'})`,
+          `pulled ${formatModelRef(pulled.ref)} from ${displayUrl(registryUrl)} -> ${pulled.dir} (model.onnx ${formatBytes(pulled.sizeBytes)}, ${pulled.integrity === 'verified' ? 'sha256 verified' : 'no checksum in manifest'})`,
         );
       }
       return {
@@ -135,7 +136,7 @@ export class ModelNotFoundError extends Error {
     if (registryUrl === null) {
       return `model ${spec} not found under ${roots}\n  (run \`xwe models pull ${spec}\`, or pass --pull)`;
     }
-    return `model ${spec} not found under ${roots} or in the registry ${registryUrl}\n  (see \`xwe models list\`)`;
+    return `model ${spec} not found under ${roots} or in the registry ${displayUrl(registryUrl)}\n  (see \`xwe models list\`)`;
   }
 }
 

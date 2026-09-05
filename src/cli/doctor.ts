@@ -2,7 +2,9 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 import { buildCatalogPayload } from '../catalog/index';
+import { scrubSecretEnv } from '../engine/child-env';
 import { canResolve, installedVersion, lazyRequire, ownPackageVersion } from '../engine/lazy-require';
+import { displayUrl } from '../engine/redact';
 import { displayPath } from '../local/paths';
 import { fetchRegistryIndex, registryUrlFrom, RegistryHttpError } from '../local/registry-client';
 import { defaultModelDirs, resolveFfmpeg } from '../local/target';
@@ -28,10 +30,10 @@ function ffmpegLine(env: NodeJS.ProcessEnv): { text: string; ok: boolean } {
   if (!resolved) return { text: 'not found; set FFMPEG_PATH or install it', ok: false };
   let file = resolved;
   if (resolved === 'ffmpeg') {
-    const which = spawnSync('which', ['ffmpeg'], { encoding: 'utf8' });
+    const which = spawnSync('which', ['ffmpeg'], { encoding: 'utf8', env: scrubSecretEnv(env) });
     if (which.status === 0 && which.stdout.trim()) file = which.stdout.trim();
   }
-  const probe = spawnSync(resolved, ['-version'], { encoding: 'utf8' });
+  const probe = spawnSync(resolved, ['-version'], { encoding: 'utf8', env: scrubSecretEnv(env) });
   if (probe.error || probe.status !== 0) {
     return { text: `${file} (does not run: ${probe.error?.message ?? `exit ${probe.status}`})`, ok: false };
   }
@@ -100,9 +102,15 @@ function modelsLines(roots: string[], cwd: string): string[] {
 
 /** `https://models.xorgate.io (index: 4 models)`, or the reason it could not be read. */
 async function registryLine(env: NodeJS.ProcessEnv, timeoutMs: number): Promise<string> {
-  const url = registryUrlFrom(env);
+  let registry: string;
   try {
-    const { models, invalid } = await fetchRegistryIndex(url, { timeoutMs });
+    registry = registryUrlFrom(env);
+  } catch (err) {
+    return `not usable: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  const url = displayUrl(registry);
+  try {
+    const { models, invalid } = await fetchRegistryIndex(registry, { timeoutMs });
     const extra = invalid > 0 ? `, ${invalid} unparseable` : '';
     return `${url} (index: ${models.length} model${models.length === 1 ? '' : 's'}${extra})`;
   } catch (err) {

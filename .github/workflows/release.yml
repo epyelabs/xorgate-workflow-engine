@@ -1,0 +1,121 @@
+# Release on a `v*` tag (the owner tags; agents never push). Two jobs in order:
+#
+#   1. npm: the tag must equal `v<package.json version>`; the full gate
+#      (`npm run ci`) must be green on the tagged tree; then
+#      `npm publish --provenance --access public`.
+#   2. image: a multi-arch (linux/amd64 + linux/arm64) build of the Dockerfile
+#      pushed to ghcr.io/epyelabs/xwe:<version> and, for a stable version,
+#      :latest; then `xwe doctor` from the pushed image.
+#
+# What the repository must have (see docs/compatibility.md, "Releasing"):
+#   - secrets.NPM_TOKEN: an npm automation token allowed to publish
+#     @xorgate/workflow-engine (or npm trusted publishing configured for this
+#     repository and this workflow file, in which case the token is unused).
+#   - `id-token: write` (below) for the provenance attestation.
+#   - `packages: write` (below) so GITHUB_TOKEN can push to GHCR; the package
+#     ghcr.io/epyelabs/xwe must allow this repository to push (first push
+#     creates it; then link it to the repository under the package settings).
+#   - Optionally a `release` environment with required reviewers; the npm job
+#     is bound to it.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  npm:
+    name: npm publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      stable: ${{ steps.version.outputs.stable }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: The tag must match package.json
+        id: version
+        run: |
+          VERSION="$(node -p 'require("./package.json").version')"
+          if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match package.json version ${VERSION}" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          case "${VERSION}" in
+            *-*) echo "stable=false" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "stable=true" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Cache the pulled fixtures
+        uses: actions/cache@v4
+        with:
+          path: |
+            fixtures/video/drive.mp4
+            fixtures/models
+          key: fixtures-${{ hashFiles('fixtures/fixtures.json') }}
+
+      - run: npm ci
+      - run: npm run ci
+
+      - name: Publish with provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  image:
+    name: ghcr.io/epyelabs/xwe (linux/amd64, linux/arm64)
+    needs: npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/epyelabs/xwe
+          tags: |
+            type=raw,value=${{ needs.npm.outputs.version }}
+            type=raw,value=latest,enable=${{ needs.npm.outputs.stable == 'true' }}
+          labels: |
+            org.opencontainers.image.title=xwe
+            org.opencontainers.image.description=The xorgate workflow engine CLI (@xorgate/workflow-engine)
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.documentation=https://docs.xorgate.io/docs/workflows
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: xwe doctor from the pushed image
+        run: docker run --rm ghcr.io/epyelabs/xwe:${{ needs.npm.outputs.version }} doctor

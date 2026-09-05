@@ -68,18 +68,19 @@ const failed = await engine.run({ template: 'overspeed.json', inputs: { telemetr
 let usage = null;
 try { await engine.run({ template: 'overspeed.json', inputs: {} }); } catch (e) { usage = { isUsage: e instanceof XweUsageError, exitCode: e.exitCode }; }
 let stub = '';
-try { await runConformance({}); } catch (e) { stub = e.message; }
-console.log(JSON.stringify({ status: ok.result.status, events: ok.result.events.length, at: ok.result.events[0]?.occurredAt, valid: validateDefinition(JSON.parse(readFileSync('overspeed.json', 'utf8'))).ok, inputs: inspectTemplate(JSON.parse(readFileSync('overspeed.json', 'utf8'))).inputs.map((i) => i.key), failedStatus: failed.result.status, usage, stub }));
+try { await runConformance({}); } catch (e) { stub = e.name + ':' + e.exitCode; }
+const kit = typeof runConformance === 'function' && Array.isArray(CONFORMANCE_CASE_NAMES) && CONFORMANCE_CASE_NAMES.length === 4;
+console.log(JSON.stringify({ status: ok.result.status, events: ok.result.events.length, at: ok.result.events[0]?.occurredAt, valid: validateDefinition(JSON.parse(readFileSync('overspeed.json', 'utf8'))).ok, inputs: inspectTemplate(JSON.parse(readFileSync('overspeed.json', 'utf8'))).inputs.map((i) => i.key), failedStatus: failed.result.status, usage, stub, kit }));
 ${tail}`;
 
 const ESM_SCRIPT = LIB_SCRIPT(`import { readFileSync } from 'node:fs';
 import { createEngine, XweUsageError, validateDefinition, inspectTemplate } from '@xorgate/workflow-engine';
 import { localHost } from '@xorgate/workflow-engine/local';
-import { runConformance } from '@xorgate/workflow-engine/testing';`, '');
+import { runConformance, CONFORMANCE_CASE_NAMES } from '@xorgate/workflow-engine/testing';`, '');
 const CJS_SCRIPT = `const { readFileSync } = require('node:fs');
 const { createEngine, XweUsageError, validateDefinition, inspectTemplate } = require('@xorgate/workflow-engine');
 const { localHost } = require('@xorgate/workflow-engine/local');
-const { runConformance } = require('@xorgate/workflow-engine/testing');
+const { runConformance, CONFORMANCE_CASE_NAMES } = require('@xorgate/workflow-engine/testing');
 (async () => {
 ${LIB_SCRIPT('', '')}
 })().catch((e) => { console.error(e); process.exit(9); });`;
@@ -94,8 +95,8 @@ function checkLibrary(dir, fmt) {
   const good =
     out.status === 'succeeded' && out.events === 1 && out.at === PINNED_EVENT_AT && out.valid === true &&
     JSON.stringify(out.inputs) === '["telemetry"]' && out.failedStatus === 'failed' &&
-    out.usage?.isUsage === true && out.usage?.exitCode === 2 && out.stub === 'runConformance is not implemented until M5';
-  if (good) pass(`${fmt}: createEngine + localHost ran overspeed (1 event at ${PINNED_EVENT_AT}); failed run resolves; usage rejects with exitCode 2; ./testing stub present`);
+    out.usage?.isUsage === true && out.usage?.exitCode === 2 && out.stub === 'XweUsageError:2' && out.kit === true;
+  if (good) pass(`${fmt}: createEngine + localHost ran overspeed (1 event at ${PINNED_EVENT_AT}); failed run resolves; usage rejects with exitCode 2; ./testing exports the conformance kit (four cases; no host rejects with exit code 2)`);
   else fail(`${fmt}: unexpected library result ${JSON.stringify(out)}`);
 }
 

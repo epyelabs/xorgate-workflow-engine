@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { displayUrl } from '../engine/redact';
 import { modelManifestSchema, type ModelManifest } from '../models/registry';
 import { formatModelRef, type ModelRef } from './model-ref';
 
@@ -27,10 +28,30 @@ import { formatModelRef, type ModelRef } from './model-ref';
 
 export const DEFAULT_MODEL_REGISTRY = 'https://models.xorgate.io';
 
-/** Registry URL from the environment (`XWE_MODEL_REGISTRY`), else the public one. */
+/**
+ * Registry URL from the environment (`XWE_MODEL_REGISTRY`), else the public
+ * one. A URL carrying credentials (`https://user:token@host`) is refused with
+ * a message that names the variable, not the value: the client's HTTP layer
+ * cannot use them, and its own error would echo them into logs.
+ */
 export function registryUrlFrom(env: NodeJS.ProcessEnv = process.env): string {
   const configured = env.XWE_MODEL_REGISTRY;
-  return configured && configured.trim() !== '' ? configured.trim() : DEFAULT_MODEL_REGISTRY;
+  const url = configured && configured.trim() !== '' ? configured.trim() : DEFAULT_MODEL_REGISTRY;
+  if (urlHasCredentials(url)) {
+    throw new Error(
+      'XWE_MODEL_REGISTRY must not carry credentials (user:password@host); point it at a registry or mirror that needs none',
+    );
+  }
+  return url;
+}
+
+function urlHasCredentials(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.username !== '' || u.password !== '';
+  } catch {
+    return false;
+  }
 }
 
 export class RegistryHttpError extends Error {
@@ -38,7 +59,7 @@ export class RegistryHttpError extends Error {
     readonly url: string,
     readonly status: number,
   ) {
-    super(`HTTP ${status} for ${url}`);
+    super(`HTTP ${status} for ${displayUrl(url)}`);
     this.name = 'RegistryHttpError';
   }
 }
@@ -157,7 +178,7 @@ export class ModelNotInRegistryError extends Error {
     readonly ref: ModelRef,
     readonly registryUrl: string,
   ) {
-    super(`model ${formatModelRef(ref)} is not in the registry ${registryUrl} (see \`xwe models list\`)`);
+    super(`model ${formatModelRef(ref)} is not in the registry ${displayUrl(registryUrl)} (see \`xwe models list\`)`);
     this.name = 'ModelNotInRegistryError';
   }
 }
@@ -201,7 +222,7 @@ export async function pullModel(opts: PullOptions): Promise<PullResult> {
   }
   if (manifest.family !== ref.family || manifest.name !== ref.name) {
     throw new Error(
-      `registry ${registryUrl} served a manifest for ${manifest.family}/${manifest.name} where ${formatModelRef(ref)} was expected`,
+      `registry ${displayUrl(registryUrl)} served a manifest for ${manifest.family}/${manifest.name} where ${formatModelRef(ref)} was expected`,
     );
   }
   const pinned: Required<ModelRef> = { family: manifest.family, name: manifest.name, version: manifest.version };

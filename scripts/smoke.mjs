@@ -49,7 +49,7 @@ const esmProbe = spawnSync(
     const testing = await import(${JSON.stringify(join(root, 'dist/esm/testing/index.js'))});
     const native = Object.keys(createRequire(import.meta.url).cache).some((k) => ${NATIVE_RE.toString()}.test(k));
     let stub = '';
-    try { await testing.runConformance({}); } catch (e) { stub = e.message; }
+    try { await testing.runConformance({}); } catch (e) { stub = e.name + ':' + e.exitCode; }
     console.log(JSON.stringify({
       root: ['createEngine', 'runGraph', 'validateDefinition', 'inspectTemplate'].every((n) => typeof root[n] === 'function'),
       local: ['localHost', 'writeRunArtifacts', 'emitVideo'].every((n) => typeof local[n] === 'function'),
@@ -69,7 +69,26 @@ check('esm entry points load', esm !== null, esmProbe.stderr.trim().split('\n').
 check('esm root exports createEngine/runGraph/validateDefinition/inspectTemplate', esm?.root === true);
 check('esm local exports localHost/writeRunArtifacts/emitVideo', esm?.local === true);
 check('esm: importing the three entry points loads no native module', esm?.native === false);
-check('esm testing.runConformance is the M5 stub', esm?.stub === 'runConformance is not implemented until M5', esm?.stub);
+check('esm testing.runConformance without a host rejects with XweUsageError (exit code 2), running nothing', esm?.stub === 'XweUsageError:2', esm?.stub);
+check('cjs testing exports CONFORMANCE_CASE_NAMES (four cases) and CONFORMANCE_EXPECTATIONS (the pinned values)', JSON.stringify(cjsTesting.CONFORMANCE_CASE_NAMES) === JSON.stringify(['overspeed', 'detection', 'visualization', 'missing-input']) && cjsTesting.CONFORMANCE_EXPECTATIONS.overspeedAt === '2026-08-12T23:56:01.289Z' && cjsTesting.CONFORMANCE_EXPECTATIONS.detections === 81 && cjsTesting.CONFORMANCE_EXPECTATIONS.frames === 50, JSON.stringify(cjsTesting.CONFORMANCE_EXPECTATIONS));
+// 2b. Secret hygiene and log levels (M5): the exports, the env scrub and the redactor's reach.
+check('root exports LOG_LEVELS, scrubSecretEnv, SECRET_ENV_PREFIX and REDACTED', JSON.stringify(cjsRoot.LOG_LEVELS) === JSON.stringify(['silent', 'error', 'info', 'debug']) && typeof cjsRoot.scrubSecretEnv === 'function' && cjsRoot.SECRET_ENV_PREFIX === 'XORGATE_SECRET_' && cjsRoot.REDACTED === '[redacted]');
+check('scrubSecretEnv drops every XORGATE_SECRET_* entry and keeps the rest', JSON.stringify(cjsRoot.scrubSecretEnv({ PATH: '/bin', XORGATE_SECRET_A: 'x', XORGATE_SECRET_B_C: 'y', FFMPEG_PATH: '/f' })) === JSON.stringify({ PATH: '/bin', FFMPEG_PATH: '/f' }));
+{
+  // runGraph scrubs a value read through the secrets seam from the outcome and every progress message.
+  const FAKE = 'sk-smoke-LEAK-0123456789';
+  const def = { schemaVersion: 2, nodes: [
+    { id: 'src', type: 'source.telemetry', position: { x: 0, y: 0 }, data: { label: 'T', config: { metrics: ['gps.latitude', 'gps.longitude'] } } },
+    { id: 'roads', type: 'connector.third_party', position: { x: 0, y: 0 }, data: { label: 'C', config: { provider: 'here', maxLookupsPerRun: 1 } } },
+  ], edges: [{ id: 'e', source: 'src', target: 'roads', sourceHandle: 'telemetry', targetHandle: 'positions' }] };
+  const msgs = [];
+  const outcome = await cjsRoot.runGraph(
+    { runId: 'smoke-redact', mode: 'batch', deviceId: null, window: null, definition: def, bindings: { src: { kind: 'telemetry_inline', samples: [{ ts: 1, signals: { 'gps.latitude': 43.6, 'gps.longitude': -79.5 } }] } } },
+    { sources: {}, secrets: { getSecret: async () => FAKE }, httpFetch: async (url) => { throw new Error(`refused ${url} (key ${FAKE})`); }, progress: { runStatus: (m) => msgs.push(m), step: (m) => msgs.push(m), event: (m) => msgs.push(m), record: (m) => msgs.push(m) }, log: (m) => msgs.push({ log: m }) },
+  );
+  const everything = JSON.stringify({ outcome, msgs });
+  check('runGraph redacts a secret read through the seam from the outcome, the progress messages and the log', outcome.status === 'failed' && outcome.failedNodeId === 'roads' && !everything.includes(FAKE) && everything.includes('[redacted]') && outcome.error.includes('apikey=[redacted]') && outcome.error.includes('(key [redacted])'), outcome.error);
+}
 
 // 3. Catalog registry loads with all 26 node defs; payload hash printed.
 const nodeTypes = cjsRoot.listNodeTypes();

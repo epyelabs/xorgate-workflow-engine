@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import type { WorkflowDefinition } from '../schemas/workflows';
 import { coreCatalog } from '../catalog/index';
 import type { Catalog } from '../catalog/pack';
+import { scrubSecretEnv } from '../engine/child-env';
 import { ffmpegPath } from '../engine/media';
 
 /**
@@ -69,7 +70,7 @@ async function muxJpegs(files: string[], fps: number, outFile: string): Promise<
     '-c:v', 'libx264',
     '-pix_fmt', 'yuv420p',
     outFile,
-  ]);
+  ], { env: scrubSecretEnv() });
   let stderr = '';
   ff.stderr.on('data', (chunk: Buffer) => {
     stderr += chunk.toString();

@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import { parseArgs } from 'node:util';
+import { displayUrl } from '../engine/redact';
 import { checkModelDir, formatModelCheckLine } from '../local/check-model';
 import { formatModelRef, parseModelSpec } from '../local/model-ref';
 import { createModelChain, formatBytes, ModelNotFoundError, type ModelChain } from '../local/models';
@@ -61,7 +62,8 @@ function chainFor(modelDirs: string[], ctx: ModelsContext, pull: boolean): Model
   });
 }
 
-function registryFailure(err: unknown, registryUrl: string): string {
+function registryFailure(err: unknown, registry: string): string {
+  const registryUrl = displayUrl(registry);
   if (err instanceof RegistryHttpError) return `registry ${registryUrl}: ${err.message}`;
   if (err instanceof Error) {
     const code = (err as { cause?: { code?: string } }).cause?.code;
@@ -81,7 +83,7 @@ async function cmdList(modelDirs: string[], ctx: ModelsContext): Promise<number>
   }
   const { models, invalid } = index;
   ctx.stdout(
-    `registry ${chain.registryUrl} (${models.length} model${models.length === 1 ? '' : 's'}${invalid > 0 ? `, ${invalid} unparseable entr${invalid === 1 ? 'y' : 'ies'} skipped` : ''})`,
+    `registry ${displayUrl(chain.registryUrl)} (${models.length} model${models.length === 1 ? '' : 's'}${invalid > 0 ? `, ${invalid} unparseable entr${invalid === 1 ? 'y' : 'ies'} skipped` : ''})`,
   );
   const rows = models.map((m) => {
     const spec = `${m.family}/${m.name}@${m.version}`;

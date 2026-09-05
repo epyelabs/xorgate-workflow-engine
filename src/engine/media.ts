@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import * as jpeg from 'jpeg-js';
 import { BoundedChannel } from './channel';
+import { scrubSecretEnv } from './child-env';
 
 /**
  * ffmpeg + JPEG plumbing for the media executors. ffmpeg is SPAWNED, not
@@ -33,6 +34,7 @@ function lastLines(text: string, n = 3): string {
 export async function* mjpegFrames(args: string[]): AsyncIterable<Buffer> {
   const child = spawn(ffmpegPath(), [...QUIET_ARGS, ...args], {
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: scrubSecretEnv(),
   });
   let stderrTail = '';
   child.stderr.on('data', (d: Buffer) => {
@@ -143,7 +145,7 @@ export class RawFrameScaler {
         '-flush_packets', '1',
         'pipe:1',
       ],
-      { stdio: ['pipe', 'pipe', 'pipe'] },
+      { stdio: ['pipe', 'pipe', 'pipe'], env: scrubSecretEnv() },
     );
     this.child.stderr.on('data', (d: Buffer) => {
       this.stderrTail = (this.stderrTail + d.toString()).slice(-4096);

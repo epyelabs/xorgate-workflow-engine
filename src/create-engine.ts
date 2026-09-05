@@ -3,6 +3,8 @@ import { coreCatalog, corePacks } from './catalog/index';
 import { createCatalog, type Catalog, type NodePack } from './catalog/pack';
 import type { EngineSecretReader, EngineSourceBinding } from './catalog/types';
 import { runGraph, type EngineRunOutcome } from './engine/index';
+import { createLogger, isLogLevel, LOG_LEVELS, type LogLevel, type LogSink } from './engine/log';
+import { createRedactor } from './engine/redact';
 import { runManifestSchema, type EngineResult, type RunManifest } from './engine/manifest';
 import { upgradeDefinition } from './compat';
 import type { EngineHost } from './host';
@@ -39,8 +41,13 @@ export interface CreateEngineOptions {
   catalog?: Catalog;
   /** Shorthand for `createCatalog([...corePacks, ...packs])`: the core plus these. */
   packs?: ReadonlyArray<NodePack>;
-  /** Engine diagnostics (`[engine] ...` on the CLI). Default: silent. */
-  log?: (message: string) => void;
+  /**
+   * Engine diagnostics. A level (`silent` | `error` | `info` | `debug`)
+   * writes `[engine] ...` lines on stderr up to that level; a function
+   * receives every message with its level and filters itself. A
+   * one-argument callback still works. Default: silent.
+   */
+  log?: LogLevel | LogSink;
 }
 
 export interface EngineRunOptions {
@@ -173,14 +180,21 @@ export function createEngine(options: CreateEngineOptions): Engine {
   const catalog =
     options.catalog ?? (options.packs ? createCatalog([...corePacks, ...options.packs]) : coreCatalog);
   const host = options.host;
-  const log = options.log ?? (() => {});
+  if (options.log !== undefined && typeof options.log !== 'function' && !isLogLevel(options.log)) {
+    throw new XweUsageError(`createEngine: log must be a function or one of ${LOG_LEVELS.join(', ')}`);
+  }
+  const logger = createLogger(options.log ?? 'silent', (line) => process.stderr.write(`[engine] ${line}\n`));
 
   return {
     host,
     catalog,
     async run(runOptions: EngineRunOptions): Promise<EngineRunResult> {
+      const startedAt = Date.now();
       const manifest = resolveRunManifest(runOptions, catalog);
       const runId = runOptions.runId ?? manifest.runId;
+      logger.debug(
+        `run ${runId}: ${manifest.definition.nodes.length} node(s), bindings ${manifest.inputs.map((i) => `${i.nodeId}=${i.binding.kind}`).join(', ') || 'none'}`,
+      );
       const formats = captureFormatsOf(manifest.definition);
       const rawBindings: Record<string, EngineSourceBinding> = Object.fromEntries(
         manifest.inputs.map((i) => [i.nodeId, i.binding]),
@@ -196,6 +210,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
         bound.progress,
         runOptions.progress ? objectProgress(runOptions.progress) : undefined,
       );
+      logger.debug(`run ${runId}: artifacts -> ${bound.runDir}`);
       const secrets = withSecretOverrides(bound.secrets, runOptions.secrets);
       const deadlineMs =
         runOptions.deadlineMs ??
@@ -222,15 +237,17 @@ export function createEngine(options: CreateEngineOptions): Engine {
             ...(bound.httpFetch ? { httpFetch: bound.httpFetch } : {}),
             ...(progress ? { progress } : {}),
             ...(deadlineMs ? { deadlineMs } : {}),
-            log,
+            log: logger.sink,
             catalog,
           },
         );
       } catch (err) {
         // Engine-level crash: still land a result.json, like every target does.
+        // Run-level secret values are the only ones known here; scrub them.
+        const redactor = createRedactor(Object.values(runOptions.secrets ?? {}));
         outcome = {
           status: 'failed',
-          error: err instanceof Error ? err.message : String(err),
+          error: redactor.text(err instanceof Error ? err.message : String(err)),
           failedNodeId: null,
           steps: [],
           events: [],
@@ -248,6 +265,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
         error: outcome.error,
         failedNodeId: outcome.failedNodeId,
       });
+      logger.debug(`run ${runId}: ${outcome.status} in ${Date.now() - startedAt} ms`);
       return { result, runDir: bound.runDir, outcome };
     },
   };

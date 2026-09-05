@@ -1,12 +1,80 @@
 # @xorgate/workflow-engine
 
-The portable xorgate workflow engine as one npm package: the library
-(`createEngine`, `runGraph`, the full 26-node catalog, every schema) and the
-`xwe` command. Inputs are sources (video, CSV, JSON, ...) plus a workflow
-template (JSON, definition schemaVersion 2); outputs are model records/events
-plus a trace (`events.jsonl` + `result.json`) and, on request, annotated video.
-Not published yet: it runs from this checkout (see Build / verify) until the
-0.1.0 release.
+The xorgate workflow engine as one npm package and one container image. It
+runs a workflow template (a JSON graph of 26 catalog nodes: video decoding,
+object detection, depth, segmentation, telemetry math, logic, events,
+captures, annotated video) over local files, with no account, no API key and
+no network unless a node in the graph asks for one. The same package is the
+`xwe` command, a library you embed, and a host contract you can implement
+over your own storage.
+
+Documentation: <https://docs.xorgate.io/docs/workflows> (the Workflows
+section is the manual; the pages under it describe this package).
+Compatibility policy: [docs/compatibility.md](./docs/compatibility.md).
+Changes: [CHANGELOG.md](./CHANGELOG.md). License: MIT.
+
+> Not published yet. Until the first release lands on npm and GHCR, install
+> from a checkout: `git clone`, `npm ci`, `npm run build`, then `npx xwe`.
+
+## Install
+
+```bash
+npm install @xorgate/workflow-engine        # library + the xwe command
+npm install -g @xorgate/workflow-engine     # xwe on your PATH
+npm install --omit=optional @xorgate/workflow-engine   # without ONNX Runtime and the VLM client (telemetry-only hosts)
+```
+
+`onnxruntime-node` (model nodes) and the VLM provider client (`model.vlm`)
+are optional dependencies. Video nodes need `ffmpeg` on `PATH` or in
+`FFMPEG_PATH`; npm never installs it. `xwe doctor` tells you what a machine
+is missing and how to fix it.
+
+The image bundles Node, ffmpeg and the ONNX Runtime binding for its own
+architecture (linux/amd64 and linux/arm64):
+
+```bash
+docker run --rm -v "$PWD":/work ghcr.io/epyelabs/xwe doctor
+docker run --rm -v "$PWD":/work ghcr.io/epyelabs/xwe run overspeed.json --input telemetry=window.csv --out out
+```
+
+## Run
+
+```bash
+xwe validate template.json                                   # what a run needs: inputs, secrets, models
+xwe run template.json --input video=drive.mp4 --out out       # artifacts land in out/<runId>/
+xwe run template.json --input telemetry=window.csv --progress json   # NDJSON progress on stdout
+xwe models pull detection/yolov8n                             # into ~/.xorgate/models, sha256 verified
+xwe models check ./my-models/detection/forklift/1             # validate a model directory you made
+xwe doctor                                                    # ffmpeg, ONNX Runtime, models, registry, catalog
+```
+
+- **Inputs** bind source nodes to files by key: `video`, `telemetry`, or a
+  node id. A `.csv` or `.jsonl` becomes a telemetry binding; a video file a
+  video binding. `--manifest` runs a prebuilt run manifest instead.
+- **Artifacts**: `out/<runId>/events.jsonl`, `outputs/<nodeId>/records.*`,
+  `frames/<nodeId>/<seq>.jpg`, and `result.json` written last. `--emit-video`
+  muxes each visualization node's frames into `video/<nodeId>.mp4`.
+- **Models** resolve from `--models-dir` roots, then the cache
+  (`XWE_MODELS_DIR`, default `~/.xorgate/models`), then, with `--pull` or
+  `XWE_MODELS_PULL=1`, the registry (`XWE_MODEL_REGISTRY`, default
+  `https://models.xorgate.io`). Any directory in the registry layout
+  (`<family>/<name>/<version>/{manifest.json,model.onnx}`) is a root, so your
+  own fine-tuned model is a directory, not a special case: `tools/export/`
+  turns weights into one.
+- **Secrets** for connector and VLM nodes come from the environment
+  (`XORGATE_SECRET_<LOGICAL_NAME>`, for example `XORGATE_SECRET_HERE_API_KEY`)
+  or a `--secrets file.json` of `{ "<logical-name>": "<value>" }`. A value
+  never appears in any artifact or output line, and child processes never
+  see the variables.
+- **Node packs**: `--pack <module>` (also on `validate`) registers extra nodes
+  from an npm package or a path; `examples/packs/acme-scale/` is a complete
+  one.
+- **Exit codes**: `0` success; `1` the run failed (the failing node is named,
+  `result.json` still written); `2` usage or configuration, nothing ran.
+- **Logging**: `--log-level silent | error | info | debug` on any command
+  gates stderr only; stdout carries results and the progress stream.
+
+## Embed
 
 ```ts
 import { createEngine } from "@xorgate/workflow-engine"
@@ -17,137 +85,89 @@ const run = await engine.run({ template: "./overspeed.json", inputs: { telemetry
 console.log(run.result.status, run.result.events.length, run.runDir)
 ```
 
-Entry points: `.` (core, catalog, schemas, seams), `./local` (the file host),
-`./testing` (the conformance kit). The CLI is the `bin`, not an export.
+`engine.run` resolves to `{ result, runDir, outcome }`; a failed run resolves
+with `result.status === "failed"` and `result.json` written; usage errors
+reject with `XweUsageError` (`exitCode: 2`). `createEngine({ packs })` or
+`createEngine({ catalog })` adds node packs; `createEngine({ log: "debug" })`
+or a `(message, level) => void` sink gives you the engine's diagnostics.
 
-Plan and architecture: `xorgate/plans/portable_workflow_engine_architecture/`
-(in the xorgate workspace, not this repo).
+Three entry points, ESM and CommonJS, with declaration files:
 
-## Divergence baseline
+| Import | Contents |
+| --- | --- |
+| `@xorgate/workflow-engine` | `createEngine`, `runGraph` (the storage-free core over the four host seams), `validateDefinition`, `inspectTemplate`, the catalog (`listNodeTypes`, `buildCatalogPayload`, `createCatalog`, `corePacks`, `defineNode`), the executor helpers, every schema and seam type |
+| `@xorgate/workflow-engine/local` | `localHost` and its parts (`localSources`, `localArtifactSink`, `localSecretReader`, `ndjsonProgress`, `writeRunArtifacts`, `emitVideo`), the model resolver chain, `checkModelDir` |
+| `@xorgate/workflow-engine/testing` | `runConformance` |
 
-Copied from `xorgate/backend/xorgate-core-service` at commit:
+Importing any of them loads no native module; ONNX Runtime and the VLM
+client are required lazily by the executors that use them.
 
-```
-a8862e771ff16825fec2cb458dda2575bf46a375
-```
+### Your own host
 
-This is the permanent baseline for diffing. The copies WILL drift and that is
-accepted; the frozen contracts (definition schemaVersion 2, manifest/result
-schemas, catalog node defs) are the compatibility line, not the code.
-Periodically diff `src/workflows` in core-service against this commit to
-cherry-pick fixes in either direction. Re-integration into core-service is the
-north star, out of scope here.
+The core reads and writes only through four small interfaces: sources,
+artifacts, secrets, progress. `runGraph` takes them directly; `createEngine`
+takes an `EngineHost` whose `bind` returns them plus where the run's artifacts
+live. `localHost` is the reference implementation and short enough to read.
+Prove yours with the conformance kit, which runs the engine's four golden
+expectations through your host:
 
-## Copy map (from core-service)
+```ts
+import { runConformance } from "@xorgate/workflow-engine/testing"
 
-| Source | Here | Notes |
-|---|---|---|
-| `src/workflows/engine/` | `src/engine/` | minus `target.ts` (CloudTargetIO) and `live-ingest.ts` (AWS IoT MQTT-over-WSS transport, hand-rolled SigV4; only `engine-runner/main.ts` imported it) |
-| `src/workflows/catalog/` | `src/catalog/` | verbatim, all 26 nodes |
-| `src/workflows/models/registry.ts` | `src/models/registry.ts` | schema only; S3 `store.ts` stays behind |
-| `src/workflows/validate.ts` | `src/validate.ts` | needed by `engine/index.ts` (resolvePort); AWS-free |
-| `src/workflows/compat.ts` | `src/compat.ts` | needed by `catalog/serialize.ts` and `validate.ts`; AWS-free |
-| `src/schemas/workflows.ts` | `src/schemas/workflows.ts` | the definition zod schema (frozen contract); pure zod |
-| `engine-runner/Dockerfile` | `Dockerfile` | path fixes only; multi-arch build comes later |
-
-Only import-path edits were made (the `schemas/workflows` specifiers); zero
-executor-logic changes. `org-credentials.ts` was not needed: only `target.ts`
-imported it.
-
-## Usage (M3: the local runner)
-
-```
-npx xwe validate fixtures/templates/overspeed.json
-npx xwe run fixtures/templates/overspeed.json \
-    --input telemetry=fixtures/telemetry/window.csv --out ./out
-npx xwe run fixtures/templates/perimeter-person-detect.json \
-    --input video=fixtures/video/drive.mp4 --models-dir fixtures/models --out ./out
+const report = await runConformance({ host: myHost, fixturesDir: "./fixtures" })
+// report.ok; report.cases: overspeed, detection, visualization, missing-input
 ```
 
-- `validate` strict-parses a template against the catalog and prints the
-  required `--input` keys and secrets. `run` also accepts a prebuilt
-  `--manifest manifest.json` instead of a template.
-- Artifacts land in `out/<runId>/` mirroring the cloud S3 run-prefix layout
-  exactly: `events.jsonl`, `outputs/<nodeId>/records.*`,
-  `frames/<nodeId>/<seq>.jpg`, `result.json` written last.
-- Bindings reuse the EXISTING kinds (zero executor edits): `video_local`
-  for video files; `telemetry_csv` / `telemetry_materialized` with `s3Key`
-  resolved as a local path for telemetry.
-- Models resolve from `--models-dir` roots first, then the cache
-  (`XWE_MODELS_DIR`, default `~/.xorgate/models`), then, only with `--pull`
-  or `XWE_MODELS_PULL=1`, the registry (`XWE_MODEL_REGISTRY`, default
-  `https://models.xorgate.io`), all in the registry layout
-  (`<family>/<name>/<version>/{manifest.json,model.onnx}`). `xwe models
-  list | pull | path | check` manage the cache and validate a model
-  directory; pulls verify the manifest's `files.sha256`. The checkout's
-  fixture model is a root like any other: `--models-dir fixtures/models`.
-- Large fixtures are pulled, not committed: `npm run fixtures:pull` (run by
-  `npm test`) fetches them per `fixtures/fixtures.json`.
-- Secrets: env `XORGATE_SECRET_<LOGICAL_NAME>` or `--secrets secrets.json`
-  (`{ "anthropic-api-key": "..." }`); only graphs with connector/VLM nodes
-  need any. `--progress json` emits NDJSON status/step/event lines on stdout.
-- ffmpeg: `FFMPEG_PATH`, else PATH, else the `ffmpeg-static` devDependency
-  (docker images apt-install it instead).
-- `--emit-video` muxes each visualization node's annotated frames into
-  `out/<runId>/video/<nodeId>.mp4` (h264, fps from the feeding decode_sample's
-  config). Runner-level only — no catalog node, no cloud impact.
-- `--pack <module>` (repeatable, also on `validate`) registers a node pack
-  before the run: a package name or a path resolved from the working
-  directory, whose `pack` or default export is `{ name, version, nodes }`.
-  `examples/packs/acme-scale/` is a complete one; the library takes the same
-  packs through `createEngine({ packs })` or a `createCatalog([...corePacks,
-  ...])` catalog.
-- Exit codes: 0 success, 1 run failed (failing node named on stderr), 2 usage.
-- `xwe doctor` prints node, ffmpeg, the ONNX Runtime binding, the VLM client,
-  the model roots and their contents, the registry and the catalog hash; exits
-  1 when ffmpeg or the ONNX binding is missing.
-- A hand-written `--manifest` may say `path` where the platform kinds say
-  `s3Key` (`telemetry_csv`, `telemetry_materialized`, `video_file`, session
-  segments); the local host folds the alias before the engine sees it.
+## Developing
 
-## Docker (the supported path)
-
+```bash
+npm ci
+npm run typecheck
+npm run smoke            # builds; both module formats load; catalog hash; no cloud SDK
+npm test                 # builds; the golden suite (CLI, library, conformance kit, secret hygiene, log levels)
+npm run verify:tarball   # npm pack, install into fresh projects, run through npx / import / require
+npm run ci               # all of the above
 ```
-docker build -t xwe .                                        # native arch
-docker buildx build --platform linux/amd64,linux/arm64 -t xwe .   # multi-arch
-docker run --rm -v "$PWD":/work xwe \
-    run fixtures/templates/overspeed.json \
+
+`npm test` and `npm run smoke` first run `npm run fixtures:pull`, which
+fetches the two large golden fixtures (a 25 s video and the yolov8n model)
+from the public registry per `fixtures/fixtures.json`; `XWE_FIXTURES_URL`
+points it at a mirror. Runs in the checkout pass `--models-dir fixtures/models`.
+
+The build is dual ESM + CJS from one extensionless-import source tree;
+`scripts/finalize-build.mjs` adds the extensions the ESM loader needs. The
+`xwe` bin is the CJS build. `npm pack` rebuilds `dist` first.
+
+Image:
+
+```bash
+docker build -t xwe .                                              # native architecture
+docker buildx build --platform linux/amd64,linux/arm64 -t xwe .    # multi-arch
+docker run --rm -v "$PWD":/work xwe run fixtures/templates/overspeed.json \
     --input telemetry=fixtures/telemetry/window.csv --out out
 ```
 
-The image apt-installs ffmpeg and sets the entrypoint to the CLI; mount your
-workspace (templates, inputs, `fixtures/models`, output dir) at `/work`. The
-runtime stage keeps only the image's own ONNX Runtime binding (linux/<arch>),
-which is what takes the image from 1.31 GB to 940 MB on arm64. To run the
-golden suite inside the image, mount the checkout and shadow the host's
-`node_modules` with a Linux install in a named volume:
+The runtime stage keeps only the image's own ONNX Runtime binding (arm64
+940 MB, amd64 1.03 GB). To run the golden suite inside the image, mount the
+checkout and shadow the host's `node_modules` with a Linux install in a named
+volume:
 
-```
+```bash
 npm run fixtures:pull
 docker run --rm -v "$PWD":/work -v xwe-test-modules:/work/node_modules \
     --entrypoint sh xwe -c 'npm ci --include=dev && npm test'
 ```
 
-Per host:
+CI (`.github/workflows/ci.yml`) runs the gate on Linux x64, Linux arm64 and
+macOS; a `v*` tag (`release.yml`) publishes to npm with provenance and pushes
+the multi-arch image to `ghcr.io/epyelabs/xwe`.
 
-| Host | Path |
-|---|---|
-| Linux (amd64/arm64) | docker (supported), or bare node 20 + system ffmpeg |
-| macOS dev machines | bare `node` for development (`ffmpeg-static` covers ffmpeg); docker works too |
-| Raspberry Pi 5 | the arm64 image (proven in M5) |
+## Provenance
 
-## Build / verify
-
-```
-npm ci
-npm run typecheck
-npm run smoke            # builds, loads both module formats, asserts 26 catalog nodes + no cloud deps
-npm test                 # builds, runs the golden runs through the CLI and the library
-npm run verify:tarball   # npm pack, install into fresh projects, run through npx / import / require
-npm run ci               # all of the above
-```
-
-The build is dual ESM + CJS with declaration files (`dist/esm`, `dist/cjs`),
-from one extensionless-import source tree: `scripts/finalize-build.mjs` adds
-the extensions the ESM loader needs and places `import.meta.url` in the one
-file that lazily requires optional packages. The `xwe` bin is the CJS build.
+The engine was split out of the platform's `xorgate-core-service` at commit
+`a8862e771ff16825fec2cb458dda2575bf46a375` (`src/workflows/engine`,
+`src/workflows/catalog`, the schemas), minus the cloud target wiring. The
+frozen contracts (definition `schemaVersion: 2`, the manifest and result
+schemas, the catalog node definitions) are the compatibility line between
+the two, not the code; see [docs/compatibility.md](./docs/compatibility.md).
+Re-integration into the platform is the direction, not part of this package.

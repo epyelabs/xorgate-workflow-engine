@@ -5,6 +5,7 @@ import { parseArgs } from 'node:util';
 import { coreCatalog, corePacks } from '../catalog/index';
 import { createCatalog, type NodePack } from '../catalog/pack';
 import { createEngine, XweUsageError, type EngineRunOptions } from '../create-engine';
+import { createLogger, isLogLevel, LOG_LEVELS, type Logger } from '../engine/log';
 import { inspectTemplate, loadDefinition } from '../local/manifest-builder';
 import { localHost } from '../local/host';
 import { ndjsonProgress, resolveFfmpeg } from '../local/target';
@@ -22,8 +23,11 @@ import { loadPacks } from './packs';
  *   xwe run --manifest <manifest.json> [same flags]
  *   xwe models list | pull <family>/<name>[@v] | path <family>/<name>[@v] | check <dir>
  *   xwe doctor [--models-dir dir]...
+ *   --log-level silent|error|info|debug on any command (default info)
  *
  * Exit codes: 0 success · 1 run failed (failing node named) · 2 usage/config.
+ * Diagnostics go to stderr; stdout carries results (validate, doctor, models)
+ * and the NDJSON progress stream. `--log-level` gates stderr only.
  */
 
 const USAGE = `usage:
@@ -43,11 +47,37 @@ options:
   --progress json        emit NDJSON progress on stdout
   --emit-video           mux visualization frames into out/<runId>/video/<nodeId>.mp4
   --window <from>,<to>   ISO run window (rarely needed locally)
-  --pack <module>        register a node pack (an npm package name or a path, resolved from cwd); repeatable`;
+  --pack <module>        register a node pack (an npm package name or a path, resolved from cwd); repeatable
+  --log-level <level>    stderr verbosity on any command: silent | error | info (default) | debug`;
+
+let logger: Logger = createLogger('info');
 
 function fail(message: string, code = 2): never {
-  console.error(`xwe: ${message}`);
+  logger.error(`xwe: ${message}`);
   process.exit(code);
+}
+
+/**
+ * `--log-level <level>` / `--log-level=<level>` is accepted anywhere on the
+ * line, for every subcommand, and removed before the subcommand parses its
+ * own flags. An unknown level is a usage error.
+ */
+function extractLogLevel(argv: string[]): { level: string | undefined; rest: string[] } {
+  const rest: string[] = [];
+  let level: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--log-level') {
+      level = argv[i + 1];
+      if (level === undefined) fail(`--log-level needs a value: ${LOG_LEVELS.join(' | ')}`);
+      i += 1;
+    } else if (arg.startsWith('--log-level=')) {
+      level = arg.slice('--log-level='.length);
+    } else {
+      rest.push(arg);
+    }
+  }
+  return { level, rest };
 }
 
 function cmdValidate(templatePath: string, packs: NodePack[]): number {
@@ -55,9 +85,9 @@ function cmdValidate(templatePath: string, packs: NodePack[]): number {
   const catalog = packs.length > 0 ? createCatalog([...corePacks, ...packs]) : coreCatalog;
   const info = inspectTemplate(definition, catalog);
   if (info.issues.length > 0) {
-    console.error(`INVALID: ${info.issues.length} issue(s)`);
+    logger.error(`INVALID: ${info.issues.length} issue(s)`);
     for (const issue of info.issues) {
-      console.error(
+      logger.error(
         `  ${issue.code}${issue.nodeId ? ` [${issue.nodeId}]` : ''}${issue.edgeId ? ` [edge ${issue.edgeId}]` : ''}: ${issue.message}`,
       );
     }
@@ -81,6 +111,36 @@ function cmdValidate(templatePath: string, packs: NodePack[]): number {
   return 0;
 }
 
+/**
+ * `--secrets <file>`: a JSON object of string values. Read and parse errors
+ * name the file only; the parser's message (which quotes the offending text)
+ * and the file's contents never reach stderr.
+ */
+function readSecretsFile(file: string): Record<string, string> {
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    return fail(`--secrets ${file}: cannot read it${code ? ` (${code})` : ''}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return fail(`--secrets ${file}: not valid JSON (expected { "<logical-name>": "<value>" })`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return fail(`--secrets ${file}: expected a JSON object of { "<logical-name>": "<value>" }`);
+  }
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== 'string') return fail(`--secrets ${file}: the value of "${name}" must be a string`);
+    out[name] = value;
+  }
+  return out;
+}
+
 interface RunFlags {
   manifest?: string;
   input: string[];
@@ -97,7 +157,7 @@ interface RunFlags {
 
 async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promise<number> {
   const runOptions: EngineRunOptions = {};
-  const packs = await loadPacks(flags.pack, { log: (line) => console.error(line) });
+  const packs = await loadPacks(flags.pack, { log: (line) => logger.info(line) });
   if (flags.manifest) {
     runOptions.manifest = flags.manifest;
   } else if (templatePath) {
@@ -119,10 +179,9 @@ async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promis
   }
   if (flags.runId) runOptions.runId = flags.runId;
   if (flags.emitVideo) runOptions.emitVideo = true;
+  if (flags.progress !== undefined && flags.progress !== 'json') fail(`--progress takes "json", got "${flags.progress}"`);
 
-  const secretsFile = flags.secrets
-    ? (JSON.parse(readFileSync(flags.secrets, 'utf8')) as Record<string, string>)
-    : undefined;
+  const secretsFile = flags.secrets ? readSecretsFile(flags.secrets) : undefined;
 
   const engine = createEngine({
     ...(packs.length > 0 ? { packs } : {}),
@@ -132,31 +191,30 @@ async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promis
       ...(flags.pull ? { models: { pull: true } } : {}),
       ...(secretsFile ? { secrets: secretsFile } : {}),
       ...(flags.progress === 'json' ? { progress: ndjsonProgress((line) => console.log(line)) } : {}),
+      log: (m) => logger.info(`[xwe] ${m}`),
     }),
-    log: (m) => console.error(`[engine] ${m}`),
+    log: (m, level) => logger[level](`[engine] ${m}`),
   });
 
   if (!resolveFfmpeg()) {
-    console.error(
-      'xwe: warning: no ffmpeg found (FFMPEG_PATH, PATH, or ffmpeg-static) — video nodes will fail',
-    );
+    logger.info('xwe: warning: no ffmpeg found (FFMPEG_PATH, PATH, or ffmpeg-static); video nodes will fail');
   }
 
   const startedAt = Date.now();
   const { result, runDir, outcome } = await engine.run(runOptions);
 
   const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-  console.error(`[xwe] ${outcome.status} in ${seconds}s -> ${path.join(runDir, 'result.json')}`);
+  logger.info(`[xwe] ${outcome.status} in ${seconds}s -> ${path.join(runDir, 'result.json')}`);
   for (const step of result.steps) {
-    console.error(`  ${step.status.padEnd(7)} ${step.nodeId.padEnd(12)} ${step.output}`);
+    logger.info(`  ${step.status.padEnd(7)} ${step.nodeId.padEnd(12)} ${step.output}`);
   }
   if (outcome.status === 'failed') {
-    console.error(
+    logger.error(
       `xwe: run failed at node ${outcome.failedNodeId ?? '(none)'}: ${outcome.error ?? 'unknown error'}`,
     );
     return 1;
   }
-  console.error(`  events: ${result.events.length}`);
+  logger.info(`  events: ${result.events.length}`);
   return 0;
 }
 
@@ -167,7 +225,12 @@ async function cmdDoctor(modelDirs: string[]): Promise<number> {
 }
 
 async function main(): Promise<number> {
-  const [command, ...rest] = process.argv.slice(2);
+  const { level, rest: argv } = extractLogLevel(process.argv.slice(2));
+  if (level !== undefined) {
+    if (!isLogLevel(level)) fail(`--log-level must be one of ${LOG_LEVELS.join(', ')}, got "${level}"`);
+    logger = createLogger(level);
+  }
+  const [command, ...rest] = argv;
   if (command === 'validate') {
     const { values, positionals } = parseArgs({
       args: rest,
@@ -176,7 +239,7 @@ async function main(): Promise<number> {
     });
     const templatePath = positionals[0];
     if (!templatePath) fail(`validate needs a template path\n${USAGE}`);
-    const packs = await loadPacks(values.pack ?? [], { log: (line) => console.error(line) });
+    const packs = await loadPacks(values.pack ?? [], { log: (line) => logger.info(line) });
     return cmdValidate(templatePath, packs);
   }
   if (command === 'run') {
@@ -212,7 +275,8 @@ async function main(): Promise<number> {
     });
   }
   if (command === 'models') {
-    return runModelsCommand(rest);
+    // `xwe:` lines are failures; `[xwe]` lines are the pull narrative.
+    return runModelsCommand(rest, { stderr: (line) => (line.startsWith('xwe:') ? logger.error(line) : logger.info(line)) });
   }
   if (command === 'doctor') {
     const { values } = parseArgs({
@@ -228,7 +292,7 @@ async function main(): Promise<number> {
 main().then(
   (code) => process.exit(code),
   (err) => {
-    console.error(`xwe: ${err instanceof Error ? err.message : String(err)}`);
+    logger.error(`xwe: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(err instanceof XweUsageError || err instanceof ModelsUsageError ? err.exitCode : 2);
   },
 );

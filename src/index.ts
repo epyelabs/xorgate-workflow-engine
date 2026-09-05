@@ -10,6 +10,11 @@
 export { createEngine, XweUsageError, resolveRunManifest } from './create-engine';
 export type { CreateEngineOptions, Engine, EngineRunOptions, EngineRunResult } from './create-engine';
 export type { EngineHost, EngineHostBindArgs, EngineBoundRun } from './host';
+export type { LogLevel, LogSink, MessageLevel } from './engine/log';
+export { LOG_LEVELS } from './engine/log';
+// Secret hygiene: the environment a child process may inherit (no XORGATE_SECRET_*).
+export { scrubSecretEnv, SECRET_ENV_PREFIX } from './engine/child-env';
+export { REDACTED } from './engine/redact';
 
 // Low level: the core and its seams
 export { runGraph, DEFAULT_CHANNEL_CAPACITY } from './engine/index';
