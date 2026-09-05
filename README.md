@@ -13,9 +13,6 @@ section is the manual; the pages under it describe this package).
 Compatibility policy: [docs/compatibility.md](./docs/compatibility.md).
 Changes: [CHANGELOG.md](./CHANGELOG.md). License: MIT.
 
-> Not published yet. Until the first release lands on npm and GHCR, install
-> from a checkout: `git clone`, `npm ci`, `npm run build`, then `npx xwe`.
-
 ## Install
 
 ```bash
@@ -159,8 +156,9 @@ docker run --rm -v "$PWD":/work -v xwe-test-modules:/work/node_modules \
 ```
 
 CI (`.github/workflows/ci.yml`) runs the gate on Linux x64, Linux arm64 and
-macOS; a `v*` tag (`release.yml`) publishes to npm with provenance and pushes
-the multi-arch image to `ghcr.io/epyelabs/xwe`.
+macOS. `release.yml` (manual trigger) publishes to npm with provenance and
+pushes the multi-arch image to `ghcr.io/epyelabs/xwe`; the version in
+`package.json` must match the `v*` tag it is run for.
 
 ## Provenance
 

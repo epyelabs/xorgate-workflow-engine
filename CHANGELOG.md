@@ -6,7 +6,7 @@ version number follows the policy in [docs/compatibility.md](./docs/compatibilit
 
 ## Unreleased
 
-## 0.1.0 (in preparation)
+## 0.1.0 (2026-09-05)
 
 The first published release: the engine that ran from a checkout, packaged.
 Core catalog `catalogVersion` `e481243f5ffe4678` (26 nodes, unchanged since
@@ -46,9 +46,10 @@ the engine was split out of the platform).
   exit codes are declared stable (`docs/compatibility.md`).
 - `docs/compatibility.md`: the contract table and the semver policy.
 - CI (`.github/workflows/ci.yml`: typecheck, smoke, the golden suite and
-  `verify:tarball` on Linux x64, Linux arm64 and macOS) and the release
-  workflow (`release.yml`: npm publish with provenance, multi-arch image to
-  `ghcr.io/epyelabs/xwe`).
+  `verify:tarball` on Linux x64, Linux arm64 and macOS) and a release
+  workflow (`release.yml`, manual trigger for now: npm publish with
+  provenance, multi-arch image to `ghcr.io/epyelabs/xwe`). 0.1.0 itself was
+  published from a maintainer's machine.
 - The container image keeps only its own ONNX Runtime binding (arm64 940 MB,
   amd64 1.03 GB).
 

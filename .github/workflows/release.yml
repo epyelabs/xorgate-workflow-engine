@@ -1,4 +1,8 @@
-# Release on a `v*` tag (the owner tags; agents never push). Two jobs in order:
+# Release: two jobs in order. Trigger is MANUAL for now (Actions > Release >
+# Run workflow on the `v<version>` tag); 0.1.0 was published from a
+# maintainer's machine with `npm publish --access public` and the tag pushed
+# afterwards. Switch `on:` back to `push: tags: ['v*']` once the secrets and
+# permissions below are configured and the owner wants tags to publish.
 #
 #   1. npm: the tag must equal `v<package.json version>`; the full gate
 #      (`npm run ci`) must be green on the tagged tree; then
@@ -20,8 +24,7 @@
 name: Release
 
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -51,7 +54,7 @@ jobs:
         run: |
           VERSION="$(node -p 'require("./package.json").version')"
           if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
-            echo "tag ${GITHUB_REF_NAME} does not match package.json version ${VERSION}" >&2
+            echo "run this workflow on the tag v${VERSION} (got ${GITHUB_REF_NAME})" >&2
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
