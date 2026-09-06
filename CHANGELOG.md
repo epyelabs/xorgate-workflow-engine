@@ -4,12 +4,59 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
-## Unreleased
+## 0.2.0 (in preparation)
 
-Work towards 0.2.0: code function nodes (`function.javascript`,
-`function.python`), the function runtime and `xwe function test`. The core
-catalog hash moves on purpose when the two nodes land; both hashes are named
-here at release time.
+Code function nodes. Core catalog `catalogVersion` moves from
+`e481243f5ffe4678` (0.1.0, 26 nodes) to `08c8c39436928e5e` (28 nodes): a
+minor under the policy in `docs/compatibility.md`, because two core nodes
+were added. The 26 pre-existing definitions are byte-identical; on their own
+they still hash to `e481243f5ffe4678` (`npm run smoke` asserts it).
+
+### Added
+
+- `function.javascript` and `function.python` (group `function`, the eighth
+  core pack `core/function`): a handler stored in the template, run once per
+  incoming `json` event (any tag, port `event`) in a sandboxed child process,
+  its return value emitted as `json/result` with the event's `ts`; `null`,
+  `undefined` or `None` drops the event. Config: `handler` (`"handler"`),
+  `timeoutMs` (3000, 100 to 30000), `memoryMb` (256, 128 to 2048), `code`
+  (at most 256 KB), `versions[]` (`{ version, code, handler, publishedAt,
+  description? }`) and `deployedVersion` (runs when present in `versions`,
+  else the working copy). `ui.editor: "code"`, `runtime.target: "any"`.
+- The function runtime: one process per node instance per run, started on
+  the first event, JSON per line over stdio (`dist/runtime/js/runner.cjs`,
+  `dist/runtime/python/runner.py`, shipped in the package). JavaScript runs
+  under the engine's own `node` with the permission model on and no file
+  system, child-process or worker grants (only a read grant on the runner
+  file itself), `--max-old-space-size` from `memoryMb`, the user's code in a
+  V8 context with only the language built-ins, timers and a log console
+  (no `process`, no `require`, no `import()`, no `eval`, no `fetch`).
+  Python runs `python3 -I -S` from `PATH` with `RLIMIT_AS` from `memoryMb`
+  where the platform enforces it, the standard library minus the modules
+  that reach files, processes or the network, and `open()` refused.
+  `timeoutMs` per invocation kills the process and fails the step. The
+  child environment is an allowlist (`PATH`, `HOME`, locale, `TZ`, temp
+  directories): no `XORGATE_SECRET_*`, no `NODE_OPTIONS`.
+- `context` = `{ log, nodeId, runId, functionVersion, remainingTimeMs }`;
+  `context.log` lines (and `console.log` / `print()`) reach the run as
+  `record` progress messages on the pseudo-port `log`, tagged `log`, payload
+  `{ line, invocation }`, and are listed in a failed step's output. Step
+  summary `N invocation(s), M result(s), K dropped[, L log line(s)]
+  ($LATEST|vN, javascript|python, ~X ms)`.
+- `xwe function test <template> <nodeId> --event <file> [--version n]` and
+  `engine.testFunction({ template, nodeId, event, version? })` resolving
+  `{ ok, result?, error?, logs, durationMs, functionVersion, nodeId, type,
+  language, runtime }`; exit 1 when the handler threw, timed out or failed
+  to load, 2 when nothing ran.
+- `xwe doctor` reports `python3` (informational).
+- The container image installs `python3` (arm64 940 MB to 991 MB, amd64
+  1.03 GB to 1.08 GB).
+- `EngineRunCtx` gains an optional `emitRecord` and a `level` argument on
+  `log` (additive); root exports `resolveFunctionCode`,
+  `functionChildEnv`, `functionSpawnSpec`, `nodePermissionFlag`,
+  `FUNCTION_CODE_MAX_BYTES` and the function types.
+- `examples/functions/`: the docs' forklift-summary template in both
+  languages and the event to test it with.
 
 ## 0.1.0 (2026-09-05)
 

@@ -3,9 +3,10 @@
  * The JavaScript function runner: one process per `function.javascript` node
  * instance per run, spawned by the engine (src/engine/function-runtime.ts) as
  *
- *   node --permission --max-old-space-size=<memoryMb> runner.cjs
+ *   node --permission --allow-fs-read=<this file> --max-old-space-size=<memoryMb> runner.cjs
  *
- * (`--experimental-permission` on Node 20/21). It speaks one JSON object per
+ * (`--experimental-permission` on Node 20/21; the read grant covers only
+ * this file, which Node 20 needs to load the entry point). It speaks one JSON object per
  * line: requests on stdin, answers on stdout, diagnostics on stderr.
  *
  *   -> { t: "init", code, handler, version, nodeId, runId, timeoutMs }
@@ -303,7 +304,7 @@ async function pump() {
           runtime: `node ${process.versions.node}`,
           limits: {
             memory: heap ? `max-old-space-size ${heap} MB` : 'default heap',
-            permission: process.permission ? 'enabled, no grants' : 'off',
+            permission: process.permission ? 'enabled (read grant on the runner file only)' : 'off',
           },
         });
       } catch (err) {

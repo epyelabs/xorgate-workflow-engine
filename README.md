@@ -1,9 +1,10 @@
 # @xorgate/workflow-engine
 
 The xorgate workflow engine as one npm package and one container image. It
-runs a workflow template (a JSON graph of 26 catalog nodes: video decoding,
+runs a workflow template (a JSON graph of 28 catalog nodes: video decoding,
 object detection, depth, segmentation, telemetry math, logic, events,
-captures, annotated video) over local files, with no account, no API key and
+captures, annotated video, and your own JavaScript or Python functions) over
+local files, with no account, no API key and
 no network unless a node in the graph asks for one. The same package is the
 `xwe` command, a library you embed, and a host contract you can implement
 over your own storage.
@@ -42,7 +43,8 @@ xwe run template.json --input video=drive.mp4 --out out       # artifacts land i
 xwe run template.json --input telemetry=window.csv --progress json   # NDJSON progress on stdout
 xwe models pull detection/yolov8n                             # into ~/.xorgate/models, sha256 verified
 xwe models check ./my-models/detection/forklift/1             # validate a model directory you made
-xwe doctor                                                    # ffmpeg, ONNX Runtime, models, registry, catalog
+xwe function test template.json fn --event event.json        # one event through a function node's handler
+xwe doctor                                                    # ffmpeg, ONNX Runtime, python3, models, registry, catalog
 ```
 
 - **Inputs** bind source nodes to files by key: `video`, `telemetry`, or a
@@ -66,6 +68,13 @@ xwe doctor                                                    # ffmpeg, ONNX Run
 - **Node packs**: `--pack <module>` (also on `validate`) registers extra nodes
   from an npm package or a path; `examples/packs/acme-scale/` is a complete
   one.
+- **Code function nodes**: `function.javascript` and `function.python` hold
+  a handler inside the template and run it once per incoming `json` event in
+  a sandboxed child process (the engine's own `node` under its permission
+  model, or `python3 -I -S` from `PATH`, with `timeoutMs` and `memoryMb`
+  limits, no file system, no network, no `XORGATE_SECRET_*`); the return
+  value is emitted as `json/result`. `xwe function test` runs one event
+  through a node's handler; `examples/functions/` has the docs' example.
 - **Exit codes**: `0` success; `1` the run failed (the failing node is named,
   `result.json` still written); `2` usage or configuration, nothing ran.
 - **Logging**: `--log-level silent | error | info | debug` on any command
@@ -92,7 +101,7 @@ Three entry points, ESM and CommonJS, with declaration files:
 
 | Import | Contents |
 | --- | --- |
-| `@xorgate/workflow-engine` | `createEngine`, `runGraph` (the storage-free core over the four host seams), `validateDefinition`, `inspectTemplate`, the catalog (`listNodeTypes`, `buildCatalogPayload`, `createCatalog`, `corePacks`, `defineNode`), the executor helpers, every schema and seam type |
+| `@xorgate/workflow-engine` | `createEngine` (with `engine.run` and `engine.testFunction`), `runGraph` (the storage-free core over the four host seams), `validateDefinition`, `inspectTemplate`, the catalog (`listNodeTypes`, `buildCatalogPayload`, `createCatalog`, `corePacks`, `defineNode`), the executor helpers, every schema and seam type |
 | `@xorgate/workflow-engine/local` | `localHost` and its parts (`localSources`, `localArtifactSink`, `localSecretReader`, `ndjsonProgress`, `writeRunArtifacts`, `emitVideo`), the model resolver chain, `checkModelDir` |
 | `@xorgate/workflow-engine/testing` | `runConformance` |
 
@@ -132,8 +141,10 @@ from the public registry per `fixtures/fixtures.json`; `XWE_FIXTURES_URL`
 points it at a mirror. Runs in the checkout pass `--models-dir fixtures/models`.
 
 The build is dual ESM + CJS from one extensionless-import source tree;
-`scripts/finalize-build.mjs` adds the extensions the ESM loader needs. The
-`xwe` bin is the CJS build. `npm pack` rebuilds `dist` first.
+`scripts/finalize-build.mjs` adds the extensions the ESM loader needs, and
+`scripts/copy-runtime.mjs` copies the function runners (`runtime/`) into
+`dist/runtime/`. The `xwe` bin is the CJS build. `npm pack` rebuilds `dist`
+first.
 
 Image:
 
@@ -144,8 +155,8 @@ docker run --rm -v "$PWD":/work xwe run fixtures/templates/overspeed.json \
     --input telemetry=fixtures/telemetry/window.csv --out out
 ```
 
-The runtime stage keeps only the image's own ONNX Runtime binding (arm64
-940 MB, amd64 1.03 GB). To run the golden suite inside the image, mount the
+The runtime stage keeps only the image's own ONNX Runtime binding and adds
+`python3` for `function.python` (arm64 991 MB, amd64 1.08 GB). To run the golden suite inside the image, mount the
 checkout and shadow the host's `node_modules` with a Linux install in a named
 volume:
 

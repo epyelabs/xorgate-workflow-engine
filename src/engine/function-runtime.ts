@@ -17,7 +17,7 @@ import { packageRootDir } from './lazy-require';
  *
  * The child's environment is built from an allowlist over `scrubSecretEnv`:
  * no `XORGATE_SECRET_*`, no secrets file path, no `NODE_OPTIONS`. Node runs
- * with its permission model enabled and no grants; Python runs isolated
+ * with its permission model enabled and only a read grant on the runner file; Python runs isolated
  * (`-I -S`) with the runner's own guards.
  */
 
@@ -93,9 +93,13 @@ export function functionSpawnSpec(
 ): { command: string; args: string[] } {
   const runtimeDir = opts.runtimeDir ?? defaultRuntimeDir();
   if (language === 'javascript') {
+    // The one grant: reading the runner file itself. Node 20 does not let
+    // the entry point through on its own; the user's code cannot reach the
+    // file system anyway (no `require`, no `process`, no `import()`).
+    const runner = path.join(runtimeDir, 'js', 'runner.cjs');
     return {
       command: process.execPath,
-      args: [nodePermissionFlag(), `--max-old-space-size=${opts.memoryMb}`, '--no-warnings', path.join(runtimeDir, 'js', 'runner.cjs')],
+      args: [nodePermissionFlag(), `--allow-fs-read=${runner}`, `--max-old-space-size=${opts.memoryMb}`, '--no-warnings', runner],
     };
   }
   return { command: opts.python ?? 'python3', args: ['-I', '-S', '-B', '-u', path.join(runtimeDir, 'python', 'runner.py')] };

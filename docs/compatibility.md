@@ -14,19 +14,20 @@ so they are what the version number is about.
 | Run manifest | `manifestVersion: 2` | `runManifestSchema` (`src/engine/manifest.ts`) | `xwe run --manifest`, `engine.run({ manifest })`, hosts that build manifests |
 | `result.json` | `resultVersion: 2`, `engineVersion: 2` | `engineResultSchema`, `buildEngineResult` | tooling that reads run artifacts; the platform's run pages |
 | Artifact tree | `events.jsonl`, `outputs/<nodeId>/records.*`, `frames/<nodeId>/<seq>.jpg`, `result.json` last | `writeRunArtifacts` (`src/local/target.ts`) | hosts, tooling |
-| Catalog payload | `schemaVersion: 2`; `catalogVersion` is the content hash of the node definitions (the core catalog is `e481243f5ffe4678`); `packs[]` is additive | `buildCatalogPayload` (`src/catalog/index.ts`) | editors, drift detection between two hosts |
-| Node definitions | every `NodeTypeDef` field of the 26 core nodes: type, version, ports, config schema, `requires` | `src/catalog/nodes/*.ts` | templates (a changed def changes `catalogVersion`) |
+| Catalog payload | `schemaVersion: 2`; `catalogVersion` is the content hash of the node definitions (the core catalog is `08c8c39436928e5e` from 0.2.0, `e481243f5ffe4678` in 0.1.0); `packs[]` is additive | `buildCatalogPayload` (`src/catalog/index.ts`) | editors, drift detection between two hosts |
+| Node definitions | every `NodeTypeDef` field of the 28 core nodes: type, version, ports, config schema, `requires` | `src/catalog/nodes/*.ts` | templates (a changed def changes `catalogVersion`) |
 | Model manifest | v1; the `files` block is additive; `family` is an open string with `MODEL_FAMILIES` as the known values | `modelManifestSchema` (`src/models/registry.ts`) | registries, `xwe models check`, bring-your-own models |
 | Registry layout | `<family>/<name>/<version>/{manifest.json,model.onnx}`, `index.json` at the root as an array of manifests | `src/local/registry-client.ts` | private registries and mirrors |
 | Host seams | `EngineSourceReader`, `EngineArtifactSink`, `EngineSecretReader`, `EngineProgressSink`; `EngineHost.bind` returning `EngineBoundRun` | `src/catalog/types.ts`, `src/host.ts` | host implementers (the platform shell, custom storage) |
 | `EngineSourceReader.fetchModel` | `({ family, name }) => { manifest, modelPath }`; a version pin rides in `name` as `name@version` | `src/catalog/types.ts` | hosts |
 | Progress messages | `t: status \| step \| event \| record`, each stamped `at`; the same objects as NDJSON (`--progress json`) and as callbacks (`engine.run({ progress })`) | `objectProgress` (`src/local/target.ts`); schemas `sim*PayloadSchema` (`src/engine/progress.ts`) | `--progress json` consumers, platform transports |
 | CLI exit codes | `0` success, `1` the run or validation failed (`result.json` written for runs), `2` usage or configuration (nothing ran) | `src/cli/index.ts` | scripts, CI |
-| CLI commands and flags | `validate`, `run`, `models list \| pull \| path \| check`, `doctor`; every flag on the CLI reference | `src/cli/*.ts` | operators |
+| CLI commands and flags | `validate`, `run`, `models list \| pull \| path \| check`, `function test`, `doctor`; every flag on the CLI reference | `src/cli/*.ts` | operators |
 | Library entry points | `.`, `./local`, `./testing`, the names each exports | `src/index.ts`, `src/local/index.ts`, `src/testing/index.ts` | applications embedding the engine |
 | Node packs | `NodePack { name, version, nodes: [{ def, executor }] }`, `createCatalog`, `corePacks`, the namespace rules | `src/catalog/pack.ts` | pack authors |
 | Environment | `XWE_MODELS_DIR`, `XWE_MODELS_PULL`, `XWE_MODEL_REGISTRY`, `XORGATE_SECRET_<LOGICAL_NAME>`, `FFMPEG_PATH` | `src/local/paths.ts`, `src/local/target.ts` | operators |
 | Conformance kit | the four cases and their pinned expectations (`CONFORMANCE_EXPECTATIONS`) | `src/testing/conformance.ts` | host implementers |
+| Code functions | the handler contract (`handler(event, context)`, `context = { log, nodeId, runId, functionVersion, remainingTimeMs }`, the return value as `json/result`, `null` drops), the config shape and the version rule, `log` records on the pseudo-port `log`, `engine.testFunction`'s result shape | `src/catalog/nodes/function-common.ts`, `src/engine/function-runtime.ts` | template authors, the platform editor |
 | Node.js | `>=20` | `package.json` `engines` | everyone |
 
 Everything else is implementation. In particular these are **not** contracts,
@@ -35,7 +36,9 @@ human-readable stderr, the wording of step summaries (they are one-line
 human text; the conformance kit matches their leading counts, not their
 prose), the internal module layout under `dist/` (deep imports are not
 supported), the exact bytes of frames, JPEGs and MP4s, and detection counts
-within the documented tolerance.
+within the documented tolerance, the wire protocol between the engine and
+its function runners (`dist/runtime/`), the exact wording of the sandbox's
+refusals, and which standard-library modules the Python runner denies.
 
 ## The version number
 
