@@ -11,6 +11,14 @@ import type { EngineHost } from './host';
 import { buildLocalManifest, loadDefinition, parseTemplate } from './local/manifest-builder';
 import { captureFormatsOf } from './local/capture-formats';
 import { objectProgress, teeProgress, type EngineProgressMessage } from './local/target';
+import {
+  FunctionLoadError,
+  FunctionProcess,
+  joinTrace,
+  type FunctionEvent,
+  type FunctionLanguage,
+} from './engine/function-runtime';
+import { resolveFunctionCode, type FunctionConfig } from './catalog/nodes/function-common';
 
 /**
  * The high-level library entry: files (or objects) in, an artifact tree out,
@@ -80,11 +88,83 @@ export interface EngineRunResult {
   outcome: EngineRunOutcome;
 }
 
+/** One event for `engine.testFunction`: what a producer would have put on the wire. */
+export interface FunctionTestEvent {
+  /** The producer's tag (`detections`, `result`, ...). Default `event`. */
+  tag?: string;
+  /** Epoch milliseconds. Default: now. */
+  ts?: number;
+  seq?: number;
+  payload: unknown;
+}
+
+export interface TestFunctionOptions {
+  /** A template path, or a parsed template (bare definition or API snapshot). */
+  template: string | Record<string, unknown>;
+  /** The function node to test. */
+  nodeId: string;
+  /** The event: a path to a JSON file, or the object. */
+  event: string | FunctionTestEvent;
+  /** A published snapshot to run instead of the working copy (`--version n`). */
+  version?: number;
+  /** What `context.runId` says. Default `test-<epoch ms>`. */
+  runId?: string;
+}
+
+export interface FunctionTestResult {
+  /** The handler returned (or dropped the event) within `timeoutMs`. */
+  ok: boolean;
+  /** The return value; `null` when the handler dropped the event. Absent on failure. */
+  result?: unknown;
+  /** The error and its trace (one frame per line) when the handler threw, timed out or failed to load. */
+  error?: string;
+  /** Every `context.log` line of the invocation, in order. */
+  logs: string[];
+  durationMs: number;
+  functionVersion: '$LATEST' | number;
+  nodeId: string;
+  /** `function.javascript` or `function.python`. */
+  type: string;
+  language: FunctionLanguage;
+  /** What ran it: `node 20.20.2`, `python 3.11.2`; empty when the code failed to load. */
+  runtime: string;
+}
+
 export interface Engine {
   readonly host: EngineHost;
   /** The catalog every run of this engine validates and executes against. */
   readonly catalog: Catalog;
   run(options: EngineRunOptions): Promise<EngineRunResult>;
+  /**
+   * Runs one event through a function node in the same sandboxed runtime a
+   * run would use (`xwe function test`). Resolves for a handler that threw
+   * or timed out (`ok: false`); rejects with `XweUsageError` when the
+   * template, the node id, the version or the event is wrong and nothing ran.
+   */
+  testFunction(options: TestFunctionOptions): Promise<FunctionTestResult>;
+}
+
+const FUNCTION_TYPES: Record<string, FunctionLanguage> = {
+  'function.javascript': 'javascript',
+  'function.python': 'python',
+};
+
+function readTestEvent(event: TestFunctionOptions['event']): FunctionEvent {
+  const raw = typeof event === 'string' ? readJsonFile(event, 'event') : event;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new XweUsageError('event must be a JSON object: { "tag"?, "ts"?, "seq"?, "payload" }');
+  }
+  const obj = raw as Record<string, unknown>;
+  if (!('payload' in obj)) throw new XweUsageError('event needs a "payload" (the record the handler receives)');
+  if (obj.tag !== undefined && typeof obj.tag !== 'string') throw new XweUsageError('event.tag must be a string');
+  if (obj.ts !== undefined && typeof obj.ts !== 'number') throw new XweUsageError('event.ts must be epoch milliseconds');
+  if (obj.seq !== undefined && typeof obj.seq !== 'number') throw new XweUsageError('event.seq must be a number');
+  return {
+    tag: (obj.tag as string | undefined) ?? 'event',
+    ts: (obj.ts as number | undefined) ?? Date.now(),
+    seq: (obj.seq as number | undefined) ?? 0,
+    payload: obj.payload,
+  };
 }
 
 function usage(err: unknown): never {
@@ -267,6 +347,81 @@ export function createEngine(options: CreateEngineOptions): Engine {
       });
       logger.debug(`run ${runId}: ${outcome.status} in ${Date.now() - startedAt} ms`);
       return { result, runDir: bound.runDir, outcome };
+    },
+    async testFunction(options: TestFunctionOptions): Promise<FunctionTestResult> {
+      if (!options || typeof options.nodeId !== 'string' || !options.nodeId) {
+        throw new XweUsageError('testFunction needs a nodeId');
+      }
+      if (options.template === undefined) throw new XweUsageError('testFunction needs a template');
+      if (options.event === undefined) throw new XweUsageError('testFunction needs an event (--event <file>)');
+      let definition;
+      try {
+        definition =
+          typeof options.template === 'string' ? loadDefinition(options.template) : parseTemplate(options.template);
+      } catch (err) {
+        return usage(err);
+      }
+      const node = definition.nodes.find((n) => n.id === options.nodeId);
+      if (!node) {
+        const ids = definition.nodes.map((n) => n.id).join(', ');
+        throw new XweUsageError(`node "${options.nodeId}" is not in the template (nodes: ${ids || 'none'})`);
+      }
+      const language = FUNCTION_TYPES[node.type];
+      if (!language) {
+        throw new XweUsageError(
+          `node "${node.id}" is a ${node.type}, not a function node (function.javascript | function.python)`,
+        );
+      }
+      const typeDef = catalog.getNodeType(node.type);
+      if (!typeDef) throw new XweUsageError(`this engine's catalog has no ${node.type} (core/function pack missing)`);
+      const parsedConfig = typeDef.config.safeParse(node.data.config ?? {});
+      if (!parsedConfig.success) {
+        const issue = parsedConfig.error.issues[0];
+        const at = issue?.path.length ? ` at "${issue.path.join('.')}"` : '';
+        throw new XweUsageError(`node "${node.id}": invalid config${at}: ${issue?.message ?? 'parse failed'}`);
+      }
+      const cfg = parsedConfig.data as FunctionConfig;
+      if (options.version !== undefined && (!Number.isInteger(options.version) || options.version <= 0)) {
+        throw new XweUsageError('version must be a positive integer');
+      }
+      let resolved;
+      try {
+        resolved = resolveFunctionCode(cfg, options.version);
+      } catch (err) {
+        return usage(err);
+      }
+      const event = readTestEvent(options.event);
+      const runId = options.runId ?? `test-${Date.now()}`;
+      const logs: string[] = [];
+      const proc = new FunctionProcess({
+        language,
+        code: resolved.code,
+        handler: resolved.handler,
+        functionVersion: resolved.functionVersion,
+        nodeId: node.id,
+        runId,
+        timeoutMs: cfg.timeoutMs,
+        memoryMb: cfg.memoryMb,
+        onLog: (line) => logs.push(line),
+      });
+      const base = { logs, functionVersion: resolved.functionVersion, nodeId: node.id, type: node.type, language };
+      logger.debug(`test ${runId}: ${node.type} ${node.id} (${resolved.label}, timeout ${cfg.timeoutMs} ms, ${cfg.memoryMb} MB)`);
+      try {
+        await proc.start();
+      } catch (err) {
+        if (err instanceof FunctionLoadError) {
+          return { ...base, ok: false, error: err.message, durationMs: 0, runtime: '' };
+        }
+        // The runner could not start at all (python3 missing): nothing ran.
+        throw new XweUsageError(err instanceof Error ? err.message : String(err), { cause: err });
+      }
+      try {
+        const r = await proc.invoke(event);
+        if (r.ok) return { ...base, ok: true, result: r.value, durationMs: r.durationMs, runtime: proc.runtime };
+        return { ...base, ok: false, error: joinTrace(r.error, r.stack), durationMs: r.durationMs, runtime: proc.runtime };
+      } finally {
+        await proc.close();
+      }
     },
   };
 }

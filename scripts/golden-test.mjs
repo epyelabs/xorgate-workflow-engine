@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // The repo's regression gate: the overspeed and perimeter golden runs over
 // the fixtures, driven through the real CLI, plus the library surface
-// (createEngine + localHost in ESM and CJS), the local `path` alias and
-// `xwe doctor`. Run `npm run build` first (`npm test` does).
+// (createEngine + localHost in ESM and CJS), the local `path` alias,
+// `xwe doctor`, models, packs, the conformance kit, secret hygiene, log
+// levels and the code function nodes. Run `npm run build` first (`npm test` does).
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, existsSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -230,7 +231,7 @@ for (const [fmt, argv, imports] of [
       const prev = i === 0 ? 0 : lines.findIndex((l) => l.startsWith(`  ${all[i - 1].padEnd(18)}`));
       return idx > 0 && idx > prev;
     }), lines.slice(1).join(' | '));
-  check('doctor catalog line carries the frozen core hash', lines.some((l) => l === '  catalog           26 nodes, core e481243f5ffe4678, no packs'));
+  check('doctor catalog line carries the 0.2.0 core hash', lines.some((l) => l === '  catalog           28 nodes, core 08c8c39436928e5e, no packs'));
   check('doctor registry line names the registry URL and its reachability', lines.some((l) => /^ {2}registry {10}https:\/\/models\.xorgate\.io \((index: \d+ models?|unreachable: .+|index\.json: HTTP \d+)\)$/.test(l)), lines.find((l) => l.startsWith('  registry')));
   check('doctor models lines are the explicit root and the cache only (no ./fixtures/models by default)', !lines.some((l) => l.includes('./fixtures/models')) && lines.some((l) => l.startsWith('  models            ') && l.includes('empty-cache')), lines.filter((l) => /^ {2}(models| {6})/.test(l)).join(' | '));
 }
@@ -486,22 +487,23 @@ function serveDir(dir) {
     let out = null;
     try { out = JSON.parse(lib.stdout.trim().split('\n').at(-1)); } catch { /* reported below */ }
     check(`packs (${fmt}) library script runs`, lib.status === 0 && out !== null, lib.stderr.trim().split('\n').slice(-3).join(' | '));
-    check(`packs (${fmt}): the core payload is unchanged: e481243f5ffe4678, 26 nodes, one core pack entry with that hash`,
-      out?.coreVersion === 'e481243f5ffe4678' && out?.coreNodes === 26 && JSON.stringify(out?.corePacks) === JSON.stringify([{ name: 'core', version: pkgVersion, hash: 'e481243f5ffe4678' }]), JSON.stringify(out?.corePacks));
-    check(`packs (${fmt}): corePacks are the seven core namespaces in registry order`,
-      JSON.stringify(out?.corePackNames) === JSON.stringify(['core/source', 'core/connector', 'core/video', 'core/telemetry', 'core/model', 'core/logic', 'core/output']), String(out?.corePackNames));
+    // 0.2.0: the core hash moved on purpose (two function nodes); smoke proves the 26 older defs still hash to e481243f5ffe4678.
+    check(`packs (${fmt}): the core payload is 0.2.0's: 08c8c39436928e5e, 28 nodes, one core pack entry with that hash`,
+      out?.coreVersion === '08c8c39436928e5e' && out?.coreNodes === 28 && JSON.stringify(out?.corePacks) === JSON.stringify([{ name: 'core', version: pkgVersion, hash: '08c8c39436928e5e' }]), JSON.stringify(out?.corePacks));
+    check(`packs (${fmt}): corePacks are the eight core namespaces in registry order, core/function last`,
+      JSON.stringify(out?.corePackNames) === JSON.stringify(['core/source', 'core/connector', 'core/video', 'core/telemetry', 'core/model', 'core/logic', 'core/output', 'core/function']), String(out?.corePackNames));
     check(`packs (${fmt}): with the pack, packs[] has two entries, the core hash is unchanged and catalogVersion differs`,
-      out?.packs?.length === 2 && out.packs[0].name === 'core' && out.packs[0].hash === 'e481243f5ffe4678' && out.packs[1].name === '@acme/xwe-nodes-scale' && out.packs[1].version === '1.0.0' && /^[0-9a-f]{16}$/.test(out.packs[1].hash) && out.version !== 'e481243f5ffe4678' && out.nodes === 27 && out.cached === true,
+      out?.packs?.length === 2 && out.packs[0].name === 'core' && out.packs[0].hash === '08c8c39436928e5e' && out.packs[1].name === '@acme/xwe-nodes-scale' && out.packs[1].version === '1.0.0' && /^[0-9a-f]{16}$/.test(out.packs[1].hash) && out.version !== '08c8c39436928e5e' && out.nodes === 29 && out.cached === true,
       `${JSON.stringify(out?.packs)} catalogVersion=${out?.version}`);
     check(`packs (${fmt}): validateDefinition reports the unknown type against core and passes against the pack catalog; inspectTemplate takes the catalog`,
       out?.validateCore?.includes('UNKNOWN_NODE_TYPE') && out?.validatePack === true && out?.inspectKey === 'telemetry', JSON.stringify([out?.validateCore, out?.validatePack, out?.inspectKey]));
-    check(`packs (${fmt}): createEngine({ packs }) runs the scaled graph to 0 events; engine.catalog carries 8 packs`,
-      out?.run?.status === 'succeeded' && out.run.events === 0 && out.run.scale === 'scaled 150 samples (speed_kph × 0.05)' && /^true on 0\/149/.test(out.run.gate ?? '') && out?.enginePacks === 8, JSON.stringify(out?.run));
+    check(`packs (${fmt}): createEngine({ packs }) runs the scaled graph to 0 events; engine.catalog carries 9 packs`,
+      out?.run?.status === 'succeeded' && out.run.events === 0 && out.run.scale === 'scaled 150 samples (speed_kph × 0.05)' && /^true on 0\/149/.test(out.run.gate ?? '') && out?.enginePacks === 9, JSON.stringify(out?.run));
     check(`packs (${fmt}): createEngine({ catalog }) runs it too`, out?.viaCatalog === 'succeeded', out?.viaCatalog);
     check(`packs (${fmt}): catalog and packs together is a usage error; a core namespace, a duplicate type and an untagged json output throw naming the node`,
       out?.errors?.both === 'createEngine takes a catalog or packs, not both' && out?.errors?.namespace?.includes('node type "model.scale" uses the core namespace "model"') && out?.errors?.duplicate?.includes('Duplicate catalog node type "acme.scale" (in pack "@acme/xwe-nodes-scale" and pack "y")') && out?.errors?.tag === 'json output "o" on "acme.untagged" must declare a tag', JSON.stringify(out?.errors));
-    check(`packs (${fmt}): core minus core/model composes 22 nodes with a different core hash and no detection node`,
-      out?.minusModel?.nodes === 22 && out.minusModel.hasDetection === false && out.minusModel.packs?.length === 1 && out.minusModel.packs[0].name === 'core' && out.minusModel.packs[0].hash !== 'e481243f5ffe4678', JSON.stringify(out?.minusModel));
+    check(`packs (${fmt}): core minus core/model composes 24 nodes with a different core hash and no detection node`,
+      out?.minusModel?.nodes === 24 && out.minusModel.hasDetection === false && out.minusModel.packs?.length === 1 && out.minusModel.packs[0].name === 'core' && out.minusModel.packs[0].hash !== '08c8c39436928e5e', JSON.stringify(out?.minusModel));
   }
 }
 
@@ -686,6 +688,255 @@ for (const [fmt, argv, imports] of [
   check('createEngine({ log: fn }) receives every engine message with its level (debug trace included)', lib.status === 0 && Array.isArray(out?.seen) && out.seen.includes('debug graph: 4 node(s), 3 edge(s), order n1 -> n2 -> n3 -> n4') && out.seen.some((l) => /^debug n1: ok in \d+ ms, 150 message\(s\)$/.test(l)) && out.seen.every((l) => /^(debug|info|error) /.test(l)), lib.stderr.trim().split('\n').at(-1) || JSON.stringify(out?.seen?.slice(0, 2)));
   check('createEngine({ log: "debug" }) writes [engine] lines on stderr; "error" and the silent default write nothing', lib.stderr.includes('[engine] run golden-log-lib-debug: 4 node(s), bindings n1=telemetry_csv') && lib.stderr.includes('[engine] graph:') && !lib.stderr.includes('golden-log-lib-error') && !lib.stderr.includes('golden-log-lib-default') && !lib.stderr.includes('golden-log-lib-fn'), lib.stderr.trim().split('\n').slice(0, 2).join(' | '));
   check('createEngine({ log: "loud" }) is a usage error naming the levels; LOG_LEVELS is exported', out?.bad === 'createEngine: log must be a function or one of silent, error, info, debug' && JSON.stringify(out?.levels) === JSON.stringify(['silent', 'error', 'info', 'debug']), String(out?.bad));
+}
+
+// --- code function nodes (M7): both runners through the CLI, the library and the progress stream --
+// The docs' forklift-summary handler with "car" in place of "forklift" (the
+// golden footage is a highway; yolov8n has no forklift class), over the
+// perimeter detector, feeding a capture node; the raw detections are captured
+// next to it so the expected summaries are computed from the same run.
+{
+  const fnRoot = join(outRoot, 'functions');
+  mkdirSync(fnRoot, { recursive: true });
+  const detNodes = readJson(join(root, 'fixtures/templates/perimeter-person-detect.json')).nodes.filter((n) => ['n1', 'n2', 'n3'].includes(n.id));
+  const node = (id, type, label, config) => ({ id, type, data: { label, config }, position: { x: 0, y: 0 } });
+  const edge = (id, source, target) => ({ id, source, target });
+  const summaryJs = readFileSync(join(root, 'examples/functions/forklift-summary.js'), 'utf8').replace('"forklift"', '"car"');
+  const summaryPy = readFileSync(join(root, 'examples/functions/forklift-summary.py'), 'utf8').replace('"forklift"', '"car"');
+  const fnNode = (type, config, id = 'fn') => node(id, type, 'Function', config);
+  const detectionGraph = (fnNodes, extraNodes = [], extraEdges = []) => ({
+    schemaVersion: 2,
+    nodes: [...detNodes, ...fnNodes, node('cap', 'output.data_capture', 'Summaries', {}), node('raw', 'output.data_capture', 'Raw', {}), ...extraNodes],
+    edges: [edge('e1', 'n1', 'n2'), edge('e2', 'n2', 'n3'), edge('e3', 'n3', 'fn'), edge('e4', 'fn', 'cap'), edge('e7', 'n3', 'raw'), ...extraEdges],
+  });
+  const write = (name, tpl) => { const p = join(fnRoot, name); writeFileSync(p, JSON.stringify(tpl, null, 2)); return p; };
+  const runFn = (tpl, id, extra = [], env = {}) => xwe(['run', tpl, '--input', 'video=fixtures/video/drive.mp4', ...MODELS_DIR, '--out', fnRoot, '--run-id', id, ...extra], env);
+  const records = (id, nodeId) => readFileSync(join(fnRoot, id, 'outputs', nodeId, 'records.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const stepOf = (result, nodeId) => result.steps.find((s) => s.nodeId === nodeId);
+  const width = (b) => b.xyxy[2] - b.xyxy[0];
+  const expectedSummaries = (raw) => raw.map((r) => {
+    const cars = r.record.boxes.filter((b) => b.cls === 'car');
+    if (cars.length === 0) return null;
+    const widest = cars.reduce((a, b) => (width(b) > width(a) ? b : a));
+    return { ts: r.ts, tag: 'result', record: { frameSeq: r.record.frameSeq, count: cars.length, widestPx: Math.round(width(widest)), confidence: widest.confidence } };
+  }).filter(Boolean);
+  const EVENT = join(root, 'examples/functions/event.json');
+  const summaryRe = /^(\d+) invocation\(s\), (\d+) result\(s\), (\d+) dropped(?:, (\d+) log line\(s\))? \((\$LATEST|v\d+), (javascript|python), ~(\d+) ms\)$/;
+
+  // 1. The JS summary function over the detector, feeding a capture node.
+  let r = runFn(write('summary-js.json', detectionGraph([fnNode('function.javascript', { handler: 'handler', timeoutMs: 1000, memoryMb: 128, code: summaryJs, versions: [], deployedVersion: null })])), 'fn-js');
+  check('function (js): the car-summary function over the perimeter detector, feeding a capture node, exits 0', r.status === 0, r.stderr.trim().split('\n').at(-1));
+  console.log(`     (function js wall time: ${r.seconds.toFixed(1)}s)`);
+  const jsResult = readJson(join(fnRoot, 'fn-js/result.json'));
+  const raw = records('fn-js', 'raw');
+  const expected = expectedSummaries(raw);
+  const got = records('fn-js', 'cap');
+  check('function (js): the capture holds one summary per frame with a car, tagged result with the event ts, equal to the summaries computed from the raw detections', got.length === expected.length && got.length >= 10 && got.length < 50 && got.every((g, i) => JSON.stringify(g) === JSON.stringify(expected[i])), `${got.length} record(s) vs ${expected.length} expected; first ${JSON.stringify(got[0])}`);
+  let m = stepOf(jsResult, 'fn').output.match(summaryRe);
+  check('function (js): the step summary is "N invocation(s), M result(s), K dropped ($LATEST, javascript, ~X ms)" with N = 50 frames and M = the captured records', m && m[1] === '50' && Number(m[2]) === got.length && Number(m[2]) + Number(m[3]) === 50 && m[4] === undefined && m[5] === '$LATEST' && m[6] === 'javascript', stepOf(jsResult, 'fn').output);
+  check('function (js): all 6 steps ok, the capture step counts the records', jsResult.status === 'succeeded' && jsResult.steps.length === 6 && jsResult.steps.every((s) => s.status === 'ok') && stepOf(jsResult, 'cap').output === `captured ${got.length} record(s)`, stepOf(jsResult, 'cap')?.output);
+
+  // 2. The Python twin: the same records (widestPx may differ by one: Python rounds half to even).
+  r = runFn(write('summary-py.json', detectionGraph([fnNode('function.python', { handler: 'handler', timeoutMs: 1000, memoryMb: 128, code: summaryPy, versions: [], deployedVersion: null })])), 'fn-py');
+  check('function (python): the same function in Python exits 0', r.status === 0, r.stderr.trim().split('\n').at(-1));
+  const pyResult = readJson(join(fnRoot, 'fn-py/result.json'));
+  const gotPy = records('fn-py', 'cap');
+  const expectedPy = expectedSummaries(records('fn-py', 'raw'));
+  // Frame timestamps are anchored to each run's wall clock, so the Python run is compared against its own raw capture.
+  check('function (python): the capture holds the summaries computed from that run\'s raw detections (widestPx within 1: Python rounds half to even), the same frames as the JavaScript run', gotPy.length === expectedPy.length && gotPy.length === got.length && gotPy.every((g, i) => g.ts === expectedPy[i].ts && g.tag === 'result' && g.record.frameSeq === expectedPy[i].record.frameSeq && g.record.frameSeq === got[i].record.frameSeq && g.record.count === expectedPy[i].record.count && g.record.confidence === expectedPy[i].record.confidence && Math.abs(g.record.widestPx - expectedPy[i].record.widestPx) <= 1), `${gotPy.length} vs ${expectedPy.length}; first ${JSON.stringify(gotPy[0])}`);
+  m = stepOf(pyResult, 'fn').output.match(summaryRe);
+  check('function (python): the step summary says python', m && m[1] === '50' && Number(m[2]) === gotPy.length && m[5] === '$LATEST' && m[6] === 'python', stepOf(pyResult, 'fn').output);
+
+  // 3. Chained functions with module state: fn2 keeps a running maximum, logs each new one.
+  const runningMax = `// fn2: keep a running maximum across frames and emit only when it grows
+let best = 0
+async function handler(event, context) {
+  if (event.payload.count <= best) return null
+  best = event.payload.count
+  context.log("new maximum", best, "at frame", event.payload.frameSeq)
+  return { frameSeq: event.payload.frameSeq, maxCount: best }
+}
+`;
+  r = runFn(write('chain.json', detectionGraph(
+    [fnNode('function.javascript', { code: summaryJs })],
+    [fnNode('function.javascript', { code: runningMax }, 'fn2'), node('cap2', 'output.data_capture', 'Maxima', {})],
+    [edge('e5', 'fn', 'fn2'), edge('e6', 'fn2', 'cap2')],
+  )), 'fn-chain', ['--progress', 'json', '--log-level', 'debug']);
+  check('function (chain): two chained functions exit 0', r.status === 0, r.stderr.trim().split('\n').at(-1));
+  const chainResult = readJson(join(fnRoot, 'fn-chain/result.json'));
+  const maxima = records('fn-chain', 'cap2');
+  const counts = got.map((g) => g.record.count);
+  const expectedMaxima = counts.reduce((acc, c, i) => { if (c > (acc.at(-1)?.maxCount ?? 0)) acc.push({ frameSeq: got[i].record.frameSeq, maxCount: c }); return acc; }, []);
+  check('function (chain): fn2 sees event.tag "result" and fn\'s return value as the payload; module state survives across invocations: the maxima are strictly increasing and match the summaries', maxima.length === expectedMaxima.length && maxima.length >= 2 && maxima.every((x, i) => JSON.stringify(x.record) === JSON.stringify(expectedMaxima[i])), JSON.stringify(maxima.map((x) => x.record)));
+  m = stepOf(chainResult, 'fn2').output.match(summaryRe);
+  check('function (chain): fn2\'s summary counts its invocations (fn\'s results), its results, the dropped ones and its log lines', m && Number(m[1]) === got.length && Number(m[2]) === maxima.length && Number(m[3]) === got.length - maxima.length && Number(m[4]) === maxima.length, stepOf(chainResult, 'fn2').output);
+  const ndjson = r.stdout.trim().split('\n').map((l) => JSON.parse(l));
+  const logRecords = ndjson.filter((x) => x.t === 'record' && x.nodeId === 'fn2' && x.tag === 'log');
+  check('function (chain): each context.log line is a `record` progress message tagged log on the pseudo-port log, payload { line, invocation }, in order', logRecords.length === maxima.length && logRecords.every((x, i) => x.port === 'log' && x.payload.line === `new maximum ${maxima[i].record.maxCount} at frame ${maxima[i].record.frameSeq}` && Number.isInteger(x.payload.invocation) && x.seq === i && x.ts === maxima[i].ts), JSON.stringify(logRecords[0]));
+  check('function (chain): fn\'s results tee to the progress stream as records tagged result on port result', ndjson.filter((x) => x.t === 'record' && x.nodeId === 'fn' && x.tag === 'result' && x.port === 'result').length === got.length);
+  check('function (chain): --log-level debug shows the runner start and each log line on stderr', /\[engine\] fn: javascript function runner started \(node \d+\.\d+\.\d+, \$LATEST\)/.test(r.stderr) && r.stderr.includes(`[engine] fn2: log: new maximum ${maxima[0].record.maxCount} at frame ${maxima[0].record.frameSeq}`), r.stderr.split('\n').find((l) => l.includes('runner started')));
+
+  // 4. A throwing handler fails the step with the trace and the invocation's log lines; downstream is skipped; result.json is written.
+  const boom = 'async function handler(event, context) {\n  context.log("about to fail on frame", event.payload.frameSeq)\n  const forklifts = event.payload.nope.filter((b) => b.cls === "forklift")\n  return forklifts.length\n}';
+  r = runFn(write('throws-js.json', detectionGraph([fnNode('function.javascript', { code: boom })])), 'fn-throws-js');
+  const throwsJs = readJson(join(fnRoot, 'fn-throws-js/result.json'));
+  check('function (throws, js): exit 1 naming the node and the error', r.status === 1 && r.stderr.includes("xwe: run failed at node fn: invocation 1 failed: TypeError: Cannot read properties of undefined (reading 'filter')"), r.stderr.trim().split('\n').at(-1));
+  check('function (throws, js): the step output is the error, the trace inside index.js, and the invocation\'s log lines', stepOf(throwsJs, 'fn').status === 'failed' && stepOf(throwsJs, 'fn').output === "invocation 1 failed: TypeError: Cannot read properties of undefined (reading 'filter')\n    at handler (index.js:3:40)\nlogs:\n  about to fail on frame 0", JSON.stringify(stepOf(throwsJs, 'fn').output));
+  check('function (throws, js): result.json is written, failed at fn; the capture downstream is skipped, the raw capture on the other branch completes', throwsJs.status === 'failed' && throwsJs.failedNodeId === 'fn' && stepOf(throwsJs, 'cap').status === 'skipped' && stepOf(throwsJs, 'cap').output === 'skipped (upstream failure)' && stepOf(throwsJs, 'raw').status === 'ok' && stepOf(throwsJs, 'raw').output === 'captured 50 record(s)', JSON.stringify(throwsJs.steps.map((s) => `${s.nodeId}:${s.status}`)));
+  r = runFn(write('throws-py.json', detectionGraph([fnNode('function.python', { code: 'def handler(event, context):\n    context.log("about to fail on frame", event["payload"]["frameSeq"])\n    return event["payload"]["nope"]["x"]' })])), 'fn-throws-py');
+  const throwsPy = readJson(join(fnRoot, 'fn-throws-py/result.json'));
+  check('function (throws, python): exit 1; the step output is the exception, the frame inside handler.py, and the log line; result.json written', r.status === 1 && throwsPy.status === 'failed' && throwsPy.failedNodeId === 'fn' && stepOf(throwsPy, 'fn').output === "invocation 1 failed: KeyError: 'nope'\n    at handler (handler.py:3)\nlogs:\n  about to fail on frame 0" && stepOf(throwsPy, 'cap').status === 'skipped', JSON.stringify(stepOf(throwsPy, 'fn')?.output));
+
+  // 5. A timeout kills the process and fails the step within timeoutMs + 500 ms of the event.
+  for (const [lang, code] of [['javascript', 'function handler() { while (true) {} }'], ['python', 'def handler(event, context):\n    while True:\n        pass']]) {
+    r = runFn(write(`timeout-${lang}.json`, detectionGraph([fnNode(`function.${lang}`, { timeoutMs: 500, code })])), `fn-timeout-${lang}`, ['--progress', 'json']);
+    const result = readJson(join(fnRoot, `fn-timeout-${lang}/result.json`));
+    const msgs = r.stdout.trim().split('\n').map((l) => JSON.parse(l));
+    const firstDetection = msgs.find((x) => x.t === 'record' && x.nodeId === 'n3' && x.seq === 0);
+    const fnStep = msgs.find((x) => x.t === 'step' && x.nodeId === 'fn');
+    const elapsed = firstDetection && fnStep ? Date.parse(fnStep.at) - Date.parse(firstDetection.at) : NaN;
+    check(`function (timeout, ${lang}): exit 1, the step says "invocation 1 timed out after 500 ms (the function process was killed)", result.json written`, r.status === 1 && result.status === 'failed' && result.failedNodeId === 'fn' && stepOf(result, 'fn').output === 'invocation 1 timed out after 500 ms (the function process was killed)' && stepOf(result, 'cap').status === 'skipped', JSON.stringify(stepOf(result, 'fn')?.output));
+    check(`function (timeout, ${lang}): the step failed within timeoutMs + 500 ms of the first event (${elapsed} ms)`, Number.isFinite(elapsed) && elapsed <= 1000, `${elapsed} ms`);
+  }
+
+  // 6. The sandbox: module, file system and network attempts fail as permission errors (through `xwe function test`).
+  const testCase = (name, type, code, extra = [], env = {}) => {
+    const tpl = write(`${name}.json`, { schemaVersion: 2, nodes: [fnNode(type, { code })], edges: [] });
+    return xwe(['function', 'test', tpl, 'fn', '--event', EVENT, ...extra], env);
+  };
+  const denial = (name, type, code, expectFirstLine) => {
+    const res = testCase(name, type, code);
+    const lines = res.stdout.split('\n');
+    check(`function (sandbox, ${type.split('.')[1]}): ${name} fails as a permission error (exit 1)`, res.status === 1 && lines[0].startsWith(`failed  fn           ${type}  $LATEST  `) && lines[1] === expectFirstLine, lines.slice(0, 3).join(' | ') || res.stderr.trim());
+  };
+  denial('require-fs', 'function.javascript', 'function handler() { return require("fs").readFileSync("/etc/hosts", "utf8") }', 'error: Error: require("fs") is not available in a code function: no module access, no file system, no network (ERR_ACCESS_DENIED)');
+  denial('import-net', 'function.javascript', 'async function handler() { const net = await import("node:net"); return typeof net }', 'error: Error: import() is not available in a code function: no module access (ERR_ACCESS_DENIED)');
+  denial('fetch', 'function.javascript', 'async function handler() { return await fetch("http://127.0.0.1:9/") }', 'error: Error: fetch() is not available in a code function: no module access, no file system, no network (ERR_ACCESS_DENIED)');
+  denial('eval', 'function.javascript', 'function handler() { return new Function("return process")() }', 'error: EvalError: eval() and the Function constructor are not available in a code function (ERR_ACCESS_DENIED)');
+  denial('open', 'function.python', 'def handler(event, context):\n    return open("/etc/hosts").read()', "error: PermissionError: open('/etc/hosts') is not available in a code function: no module access beyond the standard library, no file system, no network (ERR_ACCESS_DENIED)");
+  denial('socket', 'function.python', 'def handler(event, context):\n    import socket\n    return str(socket)', 'error: PermissionError: import socket is not available in a code function: no module access beyond the standard library, no file system, no network (ERR_ACCESS_DENIED)');
+  denial('subprocess', 'function.python', 'def handler(event, context):\n    import subprocess\n    return subprocess.run(["id"])', 'error: PermissionError: import subprocess is not available in a code function: no module access beyond the standard library, no file system, no network (ERR_ACCESS_DENIED)');
+  denial('os', 'function.python', 'def handler(event, context):\n    import os\n    return dict(os.environ)', 'error: PermissionError: import os is not available in a code function: no module access beyond the standard library, no file system, no network (ERR_ACCESS_DENIED)');
+  // The standard library that is allowed still works, and print() becomes a log line.
+  let res = testCase('stdlib', 'function.python', 'import json, math, statistics, re, datetime\ndef handler(event, context):\n    print("widths", [b["xyxy"][2] - b["xyxy"][0] for b in event["payload"]["boxes"]])\n    return {"mean": statistics.mean([b["confidence"] for b in event["payload"]["boxes"]]), "sqrt": math.sqrt(16), "iso": datetime.datetime.fromtimestamp(event["ts"] / 1000, datetime.timezone.utc).isoformat()}');
+  check('function (sandbox, python): json, math, statistics, re and datetime import; print() is a log line', res.status === 0 && res.stdout === 'ok      fn           function.python  $LATEST  0 ms\nresult: {"mean":0.79,"sqrt":4,"iso":"2026-08-12T23:56:31.867000+00:00"}\nlogs:\n  widths [212, 120]\n'.replace('  0 ms', `  ${res.stdout.match(/\$LATEST  (\d+) ms/)?.[1] ?? '?'} ms`), res.stdout || res.stderr);
+
+  // 7. XORGATE_SECRET_* is invisible inside the handler: no `process` at all in JavaScript;
+  // the Python interpreter is spawned with an allowlisted environment (proven with a
+  // python3 wrapper on PATH that records what it was given).
+  const SECRET_ENV = { XORGATE_SECRET_HERE_API_KEY: 'hk-function-LEAK-0123456789', XORGATE_SECRET_X: 'x-LEAK-0123456789' };
+  res = testCase('no-process', 'function.javascript', 'function handler(event, context) { return { process: typeof process, env: typeof globalThis.process, keys: Object.getOwnPropertyNames(globalThis).sort() } }', [], SECRET_ENV);
+  const noProcess = JSON.parse(res.stdout.split('\n')[1]?.replace(/^result: /, '') ?? 'null');
+  check('function (secrets, js): the handler has no `process` and no environment; its globals are the language built-ins plus timers, console, require/fetch stubs', res.status === 0 && noProcess?.process === 'undefined' && noProcess.env === 'undefined' && !noProcess.keys.includes('process') && !noProcess.keys.includes('Buffer') && ['JSON', 'Math', 'Promise', 'setTimeout', 'console', 'require', 'fetch', 'structuredClone'].every((k) => noProcess.keys.includes(k)) && !res.stdout.includes('LEAK'), JSON.stringify(noProcess?.keys?.filter((k) => /^[a-z]/.test(k))));
+  const binDir = join(fnRoot, 'bin');
+  mkdirSync(binDir, { recursive: true });
+  const realPython = spawnSync('which', ['python3'], { encoding: 'utf8' }).stdout.trim();
+  const envDump = join(fnRoot, 'python-env.json');
+  writeFileSync(join(binDir, 'python3'), `#!/bin/sh\nnode -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify(process.env))' ${JSON.stringify(envDump)}\nexec ${JSON.stringify(realPython)} "$@"\n`, { mode: 0o755 });
+  res = testCase('python-env', 'function.python', 'def handler(event, context):\n    return {"ok": True, "version": context.functionVersion, "node": context.nodeId, "remaining": context.remainingTimeMs() > 0}', [], { ...SECRET_ENV, XWE_GOLDEN_PARENT_ONLY: 'parent-only-0123456789', PATH: `${binDir}:${process.env.PATH}` });
+  const seenEnv = existsSync(envDump) ? JSON.parse(readFileSync(envDump, 'utf8')) : null;
+  // The wrapper's shell adds its own variables (PWD, SHLVL, _, and macOS's __CF_USER_TEXT_ENCODING); everything else must be the allowlist.
+  const SHELL_ADDED = ['_', 'PWD', 'SHLVL', 'OLDPWD', '__CF_USER_TEXT_ENCODING'];
+  check('function (secrets, python): python3 comes from PATH and is spawned with the allowlisted environment: PATH present, no XORGATE_SECRET_*, none of the parent\'s other variables', res.status === 0 && res.stdout.includes('result: {"ok":true,"version":"$LATEST","node":"fn","remaining":true}') && seenEnv !== null && typeof seenEnv.PATH === 'string' && !Object.keys(seenEnv).some((k) => k.startsWith('XORGATE_SECRET_')) && seenEnv.XWE_GOLDEN_PARENT_ONLY === undefined && !JSON.stringify(seenEnv).includes('LEAK') && !JSON.stringify(seenEnv).includes('parent-only') && Object.keys(seenEnv).every((k) => ['PATH', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR', 'TEMP', 'TMP', 'SYSTEMROOT', 'PATHEXT', 'COMSPEC', ...SHELL_ADDED].includes(k)), `${res.stdout.split('\n')[1]} env keys: ${seenEnv ? Object.keys(seenEnv).join(',') : 'no dump'}`);
+  // A missing python3 fails the step naming it; result.json is still written.
+  r = runFn(write('nopython.json', detectionGraph([fnNode('function.python', { code: summaryPy })])), 'fn-nopython', [], { PATH: join(fnRoot, 'empty-bin') });
+  const noPython = readJson(join(fnRoot, 'fn-nopython/result.json'));
+  check('function (python): without python3 on PATH the step fails naming it (exit 1, result.json written)', r.status === 1 && noPython.failedNodeId === 'fn' && stepOf(noPython, 'fn').output === 'python3 was not found on PATH; function.python nodes need it (xwe doctor reports it)', stepOf(noPython, 'fn')?.output);
+
+  // 8. Code that does not load fails the step at the first event (result.json written); `function test` reports it with exit 1.
+  r = runFn(write('syntax.json', detectionGraph([fnNode('function.javascript', { code: 'function handler( {' })])), 'fn-syntax');
+  const syntax = readJson(join(fnRoot, 'fn-syntax/result.json'));
+  check('function (load failure): a syntax error fails the step naming the line, result.json written', r.status === 1 && syntax.failedNodeId === 'fn' && stepOf(syntax, 'fn').output === "SyntaxError: Unexpected end of input (index.js:1)", JSON.stringify(stepOf(syntax, 'fn')?.output));
+  res = testCase('no-handler', 'function.javascript', 'const x = 1');
+  check('function test: code without the handler exits 1 saying what to define', res.status === 1 && res.stdout.split('\n')[1] === 'error: Error: handler "handler" is not a function in the code (define `async function handler(event, context)`)', res.stdout.split('\n')[1]);
+  res = testCase('py-syntax', 'function.python', 'def handler(:\n    pass');
+  check('function test (python): a syntax error exits 1 naming the line', res.status === 1 && res.stdout.split('\n')[1] === 'error: SyntaxError: invalid syntax (handler.py:1)', res.stdout.split('\n')[1]);
+
+  // 9. `xwe function test` on the docs' example, both languages; the usage errors exit 2.
+  for (const [tpl, lang] of [['examples/functions/forklift-summary.json', 'javascript'], ['examples/functions/forklift-summary-python.json', 'python']]) {
+    res = xwe(['function', 'test', tpl, 'fn', '--event', 'examples/functions/event.json']);
+    check(`function test (${lang}): the docs' forklift-summary example prints the report and exits 0`, res.status === 0 && new RegExp(`^ok      fn           function\\.${lang}  \\$LATEST  \\d+ ms\\nresult: \\{"frameSeq":3,"count":1,"widestPx":212,"confidence":0\\.81\\}\\nlogs: none\\n$`).test(res.stdout) && res.stderr === '', JSON.stringify(res.stdout));
+  }
+  res = xwe(['function', 'test', 'examples/functions/forklift-summary.json', 'fn', '--event', 'examples/functions/event.json', '--log-level', 'silent']);
+  check('function test keeps its stdout report under --log-level silent', res.status === 0 && res.stdout.startsWith('ok      fn'), res.stdout.split('\n')[0]);
+  res = xwe(['function', 'test', 'examples/functions/forklift-summary.json', 'nope', '--event', 'examples/functions/event.json']);
+  check('function test: an unknown node id exits 2 listing the nodes', res.status === 2 && res.stderr.trim() === 'xwe: node "nope" is not in the template (nodes: src, dec, det, fn, cap)' && res.stdout === '', res.stderr.trim());
+  res = xwe(['function', 'test', 'examples/functions/forklift-summary.json', 'det', '--event', 'examples/functions/event.json']);
+  check('function test: a node that is not a function exits 2', res.status === 2 && res.stderr.trim() === 'xwe: node "det" is a model.object_detection, not a function node (function.javascript | function.python)', res.stderr.trim());
+  res = xwe(['function', 'test', 'examples/functions/forklift-summary.json', 'fn', '--event', join(fnRoot, 'missing.json')]);
+  check('function test: a missing event file exits 2', res.status === 2 && res.stderr.startsWith(`xwe: event ${join(fnRoot, 'missing.json')}: ENOENT`), res.stderr.trim());
+  res = xwe(['function', 'test', 'examples/functions/forklift-summary.json', 'fn', '--event', 'examples/functions/event.json', '--version', '2']);
+  check('function test: --version of an unpublished snapshot exits 2', res.status === 2 && res.stderr.trim() === "xwe: version 2 is not in the node's versions (none published)", res.stderr.trim());
+  res = xwe(['function', 'test', 'examples/functions/forklift-summary.json', 'fn']);
+  check('function test without --event exits 2', res.status === 2 && res.stderr.trim() === 'xwe: function test needs --event <file>', res.stderr.trim());
+  writeFileSync(join(fnRoot, 'bad-event.json'), '{"tag":"x"}');
+  res = xwe(['function', 'test', 'examples/functions/forklift-summary.json', 'fn', '--event', join(fnRoot, 'bad-event.json')]);
+  check('function test: an event without a payload exits 2', res.status === 2 && res.stderr.trim() === 'xwe: event needs a "payload" (the record the handler receives)', res.stderr.trim());
+
+  // 10. Versions: deployedVersion runs the snapshot (the summary says vN); --version picks one; the working copy is $LATEST.
+  const versioned = {
+    code: 'function handler(event, context) { return { v: context.functionVersion, from: "latest" } }',
+    versions: [
+      { version: 2, code: 'function handler(event, context) { return { v: context.functionVersion, from: "v2" } }', handler: 'handler', publishedAt: '2026-09-05T00:00:00Z' },
+      { version: 1, code: 'function run(event, context) { return { v: context.functionVersion, from: "v1" } }', handler: 'run', publishedAt: '2026-09-04T00:00:00Z', description: 'first' },
+    ],
+    deployedVersion: 2,
+  };
+  const versionedTpl = write('versioned.json', { schemaVersion: 2, nodes: [fnNode('function.javascript', versioned)], edges: [] });
+  res = xwe(['function', 'test', versionedTpl, 'fn', '--event', EVENT]);
+  check('function test: deployedVersion 2 runs the snapshot: the report says v2 and context.functionVersion is 2', res.status === 0 && /^ok      fn           function\.javascript  v2  \d+ ms\nresult: \{"v":2,"from":"v2"\}\nlogs: none\n$/.test(res.stdout), JSON.stringify(res.stdout));
+  res = xwe(['function', 'test', versionedTpl, 'fn', '--event', EVENT, '--version', '1']);
+  check('function test: --version 1 runs that snapshot with its own handler name', res.status === 0 && res.stdout.includes('  v1  ') && res.stdout.includes('result: {"v":1,"from":"v1"}'), JSON.stringify(res.stdout));
+  const latestTpl = write('versioned-latest.json', { schemaVersion: 2, nodes: [fnNode('function.javascript', { ...versioned, deployedVersion: 3 })], edges: [] });
+  res = xwe(['function', 'test', latestTpl, 'fn', '--event', EVENT]);
+  check('function test: a deployedVersion that is not published falls back to the working copy ($LATEST)', res.status === 0 && res.stdout.includes('  $LATEST  ') && res.stdout.includes('result: {"v":"$LATEST","from":"latest"}'), JSON.stringify(res.stdout));
+  r = runFn(write('versioned-run.json', detectionGraph([fnNode('function.javascript', versioned)])), 'fn-versioned');
+  const versionedResult = readJson(join(fnRoot, 'fn-versioned/result.json'));
+  check('function (run): a template exported with deployedVersion 2 runs version 2 under xwe: the step summary says v2 and every record carries v: 2', r.status === 0 && /^50 invocation\(s\), 50 result\(s\), 0 dropped \(v2, javascript, ~\d+ ms\)$/.test(stepOf(versionedResult, 'fn').output) && records('fn-versioned', 'cap').every((x) => x.record.v === 2 && x.record.from === 'v2'), stepOf(versionedResult, 'fn')?.output);
+
+  // 11. The library: engine.testFunction in ESM and CJS, and a run reading function log records through engine.run({ progress }).
+  const LIB = (imports) => `
+    ${imports}
+    const template = JSON.parse(readFileSync(${JSON.stringify(join(root, 'examples/functions/forklift-summary.json'))}, 'utf8'));
+    const engine = createEngine({ host: localHost({ modelDirs: ['fixtures/models'], outDir: ${JSON.stringify(fnRoot)}, baseDir: ${JSON.stringify(root)}, log: () => {} }) });
+    const event = JSON.parse(readFileSync(${JSON.stringify(EVENT)}, 'utf8'));
+    const test = await engine.testFunction({ template, nodeId: 'fn', event });
+    const dropped = await engine.testFunction({ template, nodeId: 'fn', event: { ...event, payload: { ...event.payload, boxes: [] } } });
+    const pyTemplate = JSON.parse(readFileSync(${JSON.stringify(join(root, 'examples/functions/forklift-summary-python.json'))}, 'utf8'));
+    const py = await engine.testFunction({ template: pyTemplate, nodeId: 'fn', event: ${JSON.stringify(EVENT)} });
+    const boom = await engine.testFunction({ template: { ...template, nodes: template.nodes.map((n) => n.id === 'fn' ? { ...n, data: { ...n.data, config: { ...n.data.config, code: 'async function handler(event, context) {\\n  context.log("frame", event.payload.frameSeq)\\n  return event.payload.nope.filter(Boolean)\\n}' } } } : n) }, nodeId: 'fn', event });
+    let usage = null; try { await engine.testFunction({ template, nodeId: 'det', event }); } catch (e) { usage = { name: e.name, exitCode: e.exitCode, message: e.message }; }
+    const logs = [];
+    const run = await engine.run({ template: JSON.parse(readFileSync(${JSON.stringify(join(fnRoot, 'chain.json'))}, 'utf8')), inputs: { video: 'fixtures/video/drive.mp4' }, runId: 'fn-lib-' + FMT, progress: (m) => { if (m.t === 'record' && m.tag === 'log') logs.push('[' + m.nodeId + '] ' + m.payload.line); } });
+    console.log(JSON.stringify({ test, dropped: { ok: dropped.ok, result: dropped.result }, py: { ok: py.ok, result: py.result, language: py.language, runtime: py.runtime }, boom: { ok: boom.ok, error: boom.error, logs: boom.logs }, usage, run: { status: run.result.status, captures: run.outcome.captures.cap.length, maxima: run.outcome.captures.cap2.length, fn2: run.result.steps.find((s) => s.nodeId === 'fn2').output }, logs }));
+  `;
+  for (const [fmt, argv, imports] of [
+    ['esm', ['--input-type=module', '-e'], `const FMT = 'esm';
+     import { readFileSync } from 'node:fs';
+     import { createEngine } from ${JSON.stringify(join(root, 'dist/esm/index.js'))};
+     import { localHost } from ${JSON.stringify(join(root, 'dist/esm/local/index.js'))};`],
+    ['cjs', ['-e'], `const FMT = 'cjs';
+     const { readFileSync } = require('node:fs');
+     const { createEngine } = require(${JSON.stringify(join(root, 'dist/cjs/index.js'))});
+     const { localHost } = require(${JSON.stringify(join(root, 'dist/cjs/local/index.js'))});
+     (async () => {`],
+  ]) {
+    const body = fmt === 'cjs' ? `${LIB(imports)}\n})().catch((e) => { console.error(e); process.exit(9); });` : LIB(imports);
+    const lib = spawnSync(process.execPath, [...argv, body], { cwd: root, encoding: 'utf8', env: { ...process.env, XWE_MODELS_DIR: join(outRoot, 'empty-cache') } });
+    let out = null;
+    try { out = JSON.parse(lib.stdout.trim().split('\n').at(-1)); } catch { /* reported below */ }
+    check(`functions (${fmt}) library script runs`, lib.status === 0 && out !== null, lib.stderr.trim().split('\n').slice(-3).join(' | '));
+    check(`functions (${fmt}): engine.testFunction resolves { ok, result, logs, durationMs, functionVersion } for the docs' event`, out?.test?.ok === true && JSON.stringify(out.test.result) === '{"frameSeq":3,"count":1,"widestPx":212,"confidence":0.81}' && Array.isArray(out.test.logs) && out.test.logs.length === 0 && typeof out.test.durationMs === 'number' && out.test.functionVersion === '$LATEST' && out.test.type === 'function.javascript' && out.test.language === 'javascript' && /^node \d+/.test(out.test.runtime) && out.test.error === undefined, JSON.stringify(out?.test));
+    check(`functions (${fmt}): a dropped event resolves ok with result null; the Python twin resolves the same result under python`, out?.dropped?.ok === true && out.dropped.result === null && out?.py?.ok === true && JSON.stringify(out.py.result) === '{"frameSeq":3,"count":1,"widestPx":212,"confidence":0.81}' && out.py.language === 'python' && /^python 3\./.test(out.py.runtime), JSON.stringify([out?.dropped, out?.py]));
+    check(`functions (${fmt}): a throwing handler resolves ok false with the error, the trace and the logs; a non-function node rejects with XweUsageError (exit code 2)`, out?.boom?.ok === false && out.boom.error === "TypeError: Cannot read properties of undefined (reading 'filter')\n    at handler (index.js:3:29)" && JSON.stringify(out.boom.logs) === '["frame 3"]' && out?.usage?.name === 'XweUsageError' && out.usage.exitCode === 2 && out.usage.message.includes('not a function node'), JSON.stringify([out?.boom, out?.usage]));
+    check(`functions (${fmt}): engine.run over the chained graph succeeds and hands function log lines to progress as record messages tagged log`, out?.run?.status === 'succeeded' && out.run.captures === got.length && out.run.maxima === maxima.length && out.logs.length === maxima.length && out.logs[0] === `[fn2] new maximum ${maxima[0].record.maxCount} at frame ${maxima[0].record.frameSeq}`, JSON.stringify(out?.run));
+  }
+
+  // 12. doctor reports python3.
+  res = xwe(['doctor']);
+  check('doctor reports python3 with its path and version', res.stdout.split('\n').some((l) => /^  python3 {11}\S+python3 \(3\.\d+\.\d+\)$/.test(l)), res.stdout.split('\n').find((l) => l.startsWith('  python3')));
+  res = xwe(['doctor'], { PATH: join(fnRoot, 'empty-bin') });
+  check('doctor without python3 on PATH says so and does not fail the check', res.stdout.includes('  python3           not found on PATH; function.python nodes will fail (install python3)'), res.stdout.split('\n').find((l) => l.startsWith('  python3')));
 }
 
 if (!failed) rmSync(outRoot, { recursive: true, force: true });

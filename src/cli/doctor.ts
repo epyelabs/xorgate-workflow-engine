@@ -14,7 +14,8 @@ import { defaultModelDirs, resolveFfmpeg } from '../local/target';
  * same line when something is absent. Exits non-zero when a required piece
  * (ffmpeg, the ONNX Runtime binding) is missing. The registry line reports
  * reachability but never fails the check: a run needs the registry only when
- * it pulls.
+ * it pulls. The python3 line (distribution M7) is informational the same way:
+ * only function.python nodes need it.
  */
 
 export interface DoctorReport {
@@ -56,6 +57,17 @@ function ortLine(): { text: string; ok: boolean } {
   } catch (err) {
     return { text: `${version}, binding failed to load: ${err instanceof Error ? err.message : String(err)}`, ok: false };
   }
+}
+
+/** `/usr/bin/python3 (3.11.2)`, or why function.python nodes would fail. */
+function pythonLine(env: NodeJS.ProcessEnv): string {
+  const scrubbed = scrubSecretEnv(env);
+  const probe = spawnSync('python3', ['--version'], { encoding: 'utf8', env: scrubbed });
+  if (probe.error || probe.status !== 0) return 'not found on PATH; function.python nodes will fail (install python3)';
+  const version = `${probe.stdout}${probe.stderr}`.match(/Python (\S+)/)?.[1] ?? 'unknown version';
+  const which = spawnSync('which', ['python3'], { encoding: 'utf8', env: scrubbed });
+  const file = which.status === 0 && which.stdout.trim() ? which.stdout.trim() : 'python3';
+  return `${file} (${version})`;
 }
 
 function vlmLine(): string {
@@ -139,6 +151,9 @@ export async function doctorReport(
   lines.push(row('onnxruntime-node', ort.text));
 
   lines.push(row('vlm providers', vlmLine()));
+
+  // Informational: only function.python nodes need it, and a run without them is unaffected.
+  lines.push(row('python3', pythonLine(env)));
 
   const explicit = (opts.modelDirs ?? []).map((d) => (path.isAbsolute(d) ? d : path.join(cwd, d)));
   lines.push(...modelsLines([...explicit, ...defaultModelDirs(cwd, env)], cwd));

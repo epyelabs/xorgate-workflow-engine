@@ -95,3 +95,8 @@ export function installedVersion(pkg: string): string | null {
 export function ownPackageVersion(): string {
   return (moduleRequire()('../../../package.json') as { version: string }).version;
 }
+
+/** The package root (the directory holding package.json and dist/), in either build. */
+export function packageRootDir(): string {
+  return dirname(moduleRequire().resolve('../../../package.json'));
+}

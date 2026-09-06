@@ -5,7 +5,7 @@
 // specific is in the dependency tree. Run after `npm run build`.
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -90,13 +90,13 @@ check('scrubSecretEnv drops every XORGATE_SECRET_* entry and keeps the rest', JS
   check('runGraph redacts a secret read through the seam from the outcome, the progress messages and the log', outcome.status === 'failed' && outcome.failedNodeId === 'roads' && !everything.includes(FAKE) && everything.includes('[redacted]') && outcome.error.includes('apikey=[redacted]') && outcome.error.includes('(key [redacted])'), outcome.error);
 }
 
-// 3. Catalog registry loads with all 26 node defs; payload hash printed.
+// 3. Catalog registry loads with all 28 node defs; payload hash printed.
 const nodeTypes = cjsRoot.listNodeTypes();
-check('catalog has 26 node defs', nodeTypes.length === 26, `found ${nodeTypes.length}`);
+check('catalog has 28 node defs', nodeTypes.length === 28, `found ${nodeTypes.length}`);
 const payload = cjsRoot.buildCatalogPayload();
 check(
   'catalog payload builds',
-  typeof payload.catalogVersion === 'string' && payload.nodes.length === 26,
+  typeof payload.catalogVersion === 'string' && payload.nodes.length === 28,
   `catalogVersion=${payload.catalogVersion} schemaVersion=${payload.schemaVersion}`,
 );
 
@@ -135,15 +135,43 @@ check(
 // the `function` group, the `code` editor and the open `family`.
 {
   check('root exports createCatalog, corePacks, coreCatalog, CORE_NAMESPACES and the executor helpers', typeof cjsRoot.createCatalog === 'function' && Array.isArray(cjsRoot.corePacks) && typeof cjsRoot.coreCatalog?.getNodeType === 'function' && Array.isArray(cjsRoot.CORE_NAMESPACES) && ['requireInput', 'inputsForPort', 'telemetrySamples', 'mergeByTs', 'resolveSignal'].every((n) => typeof cjsRoot[n] === 'function'));
-  check('corePacks are seven packs totalling 26 nodes', cjsRoot.corePacks.length === 7 && cjsRoot.corePacks.reduce((n, p) => n + p.nodes.length, 0) === 26, cjsRoot.corePacks.map((p) => `${p.name}:${p.nodes.length}`).join(' '));
+  check('corePacks are eight packs totalling 28 nodes, core/function last with the two function nodes', cjsRoot.corePacks.length === 8 && cjsRoot.corePacks.reduce((n, p) => n + p.nodes.length, 0) === 28 && cjsRoot.corePacks[7].name === 'core/function' && cjsRoot.corePacks[7].nodes.map((n) => n.def.type).join(',') === 'function.javascript,function.python', cjsRoot.corePacks.map((p) => `${p.name}:${p.nodes.length}`).join(' '));
   check('payload.packs is one core entry whose hash is catalogVersion (no packs registered)', Array.isArray(payload.packs) && payload.packs.length === 1 && payload.packs[0].name === 'core' && payload.packs[0].hash === payload.catalogVersion && payload.packs[0].version === JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version, JSON.stringify(payload.packs));
-  check('catalogVersion is the frozen core hash e481243f5ffe4678', payload.catalogVersion === 'e481243f5ffe4678', payload.catalogVersion);
+  // 0.2.0 moved the core hash on purpose (two new core nodes, docs/compatibility.md: a minor).
+  // The 26 pre-0.2.0 defs are byte-identical: alone they still hash to 0.1.0's catalogVersion.
+  check('catalogVersion is the 0.2.0 core hash 08c8c39436928e5e', payload.catalogVersion === '08c8c39436928e5e', payload.catalogVersion);
+  const withoutFunctions = cjsRoot.buildCatalogPayload(cjsRoot.createCatalog(cjsRoot.corePacks.filter((p) => p.name !== 'core/function')));
+  check('the 26 pre-0.2.0 defs are unchanged: without core/function the payload hashes to 0.1.0\'s e481243f5ffe4678', withoutFunctions.nodes.length === 26 && withoutFunctions.catalogVersion === 'e481243f5ffe4678', withoutFunctions.catalogVersion);
   check('NODE_GROUPS names `function` (not `custom`) as the seventh group', cjsRoot.NODE_GROUPS.length === 7 && cjsRoot.NODE_GROUPS[6] === 'function' && !cjsRoot.NODE_GROUPS.includes('custom'), cjsRoot.NODE_GROUPS.join(','));
   check('CORE_NAMESPACES are the seven core namespaces plus function', cjsRoot.CORE_NAMESPACES.join(',') === 'source,video,telemetry,model,logic,output,connector,function', cjsRoot.CORE_NAMESPACES.join(','));
   const sample = cjsRoot.getNodeType('telemetry.ema');
   check('nodeTypeDefSchema accepts ui.editor "code" (additive) and rejects an unknown editor', cjsRoot.nodeTypeDefSchema.safeParse({ ...sample, ui: { ...sample.ui, editor: 'code' } }).success && !cjsRoot.nodeTypeDefSchema.safeParse({ ...sample, ui: { ...sample.ui, editor: 'nope' } }).success);
   const base = JSON.parse(readFileSync(join(root, 'fixtures/models/detection/yolov8n/1/manifest.json'), 'utf8'));
   check('model manifest `family` is an open string (a pack family parses; empty is refused); MODEL_FAMILIES keeps the three documented values', cjsRoot.modelManifestSchema.safeParse({ ...base, family: 'classification' }).success && !cjsRoot.modelManifestSchema.safeParse({ ...base, family: '' }).success && cjsRoot.MODEL_FAMILIES.join(',') === 'detection,depth,segmentation');
+}
+
+// 4d. Code function nodes (M7): the two defs, the config schema, the version rule, the runners in dist/.
+{
+  const js = cjsRoot.getNodeType('function.javascript');
+  const py = cjsRoot.getNodeType('function.python');
+  const portsOf = (d) => `${d.inputs.map((p) => `${p.id}:${p.channel}${p.tag ? '/' + p.tag : ''}:${p.cardinality}:${p.required}`).join(',')} -> ${d.outputs.map((p) => `${p.id}:${p.channel}/${p.tag}:${p.cardinality}`).join(',')}`;
+  check('function.javascript and function.python are core nodes in the function group with editor "code" and target any', js?.group === 'function' && py?.group === 'function' && js.ui.editor === 'code' && py.ui.editor === 'code' && js.ui.icon === 'braces' && py.ui.icon === 'file-code' && js.runtime.target === 'any' && py.runtime.target === 'any' && cjsRoot.isCorePack(cjsRoot.corePacks[7]));
+  check('function ports: event:json (untagged, many, optional) in, result:json/result out', portsOf(js) === 'event:json:many:false -> result:json/result:many' && portsOf(py) === portsOf(js), portsOf(js));
+  const defaults = js.config.parse({});
+  check('function config defaults: handler "handler", timeoutMs 3000, memoryMb 256, versions [], deployedVersion null, a starter code', defaults.handler === 'handler' && defaults.timeoutMs === 3000 && defaults.memoryMb === 256 && Array.isArray(defaults.versions) && defaults.versions.length === 0 && defaults.deployedVersion === null && typeof defaults.code === 'string' && defaults.code.includes('async function handler(event, context)') && py.config.parse({}).code.includes('def handler(event, context)'));
+  check('function config ranges: timeoutMs 100..30000, memoryMb 128..2048, code at most 256 KB, handler an identifier', !js.config.safeParse({ timeoutMs: 99 }).success && !js.config.safeParse({ timeoutMs: 30001 }).success && js.config.safeParse({ timeoutMs: 100 }).success && !js.config.safeParse({ memoryMb: 127 }).success && !js.config.safeParse({ memoryMb: 2049 }).success && js.config.safeParse({ memoryMb: 2048 }).success && !js.config.safeParse({ code: 'x'.repeat(256 * 1024 + 1) }).success && js.config.safeParse({ code: 'x'.repeat(256 * 1024) }).success && !js.config.safeParse({ handler: 'not valid' }).success && cjsRoot.FUNCTION_CODE_MAX_BYTES === 262144);
+  const versions = [{ version: 2, code: 'v2', handler: 'h2', publishedAt: '2026-09-05T00:00:00Z' }, { version: 1, code: 'v1', publishedAt: '2026-09-04T00:00:00Z', description: 'first' }];
+  const cfg = js.config.parse({ code: 'latest', versions, deployedVersion: 2 });
+  const r = cjsRoot.resolveFunctionCode;
+  check('version rule: deployedVersion present in versions runs that snapshot (its code and handler), labelled vN', JSON.stringify(r(cfg)) === JSON.stringify({ code: 'v2', handler: 'h2', functionVersion: 2, label: 'v2' }) && r(cfg, 1).code === 'v1' && r(cfg, 1).handler === 'handler' && r(cfg, 1).label === 'v1', JSON.stringify(r(cfg)));
+  check('version rule: deployedVersion null, or not in versions, runs the working copy as $LATEST', r(js.config.parse({ code: 'latest', versions })).label === '$LATEST' && r(js.config.parse({ code: 'latest', versions, deployedVersion: 3 })).code === 'latest' && r(js.config.parse({ code: 'latest', versions, deployedVersion: 3 })).functionVersion === '$LATEST');
+  let bad = ''; try { r(cfg, 3); } catch (e) { bad = e.message; }
+  check('version rule: an explicit version that is not published throws naming the published ones', bad === "version 3 is not in the node's versions (have: 2, 1)", bad);
+  check('dist/runtime holds the two runners (copied by the build) and functionSpawnSpec points at them', existsSync(join(root, 'dist/runtime/js/runner.cjs')) && existsSync(join(root, 'dist/runtime/python/runner.py')) && cjsRoot.functionSpawnSpec('javascript', { memoryMb: 128 }).args.join(' ').includes('--max-old-space-size=128') && cjsRoot.functionSpawnSpec('javascript', { memoryMb: 128 }).args.at(-1) === join(root, 'dist/runtime/js/runner.cjs') && cjsRoot.functionSpawnSpec('python').command === 'python3' && cjsRoot.functionSpawnSpec('python').args.at(-1) === join(root, 'dist/runtime/python/runner.py'));
+  check('the node flag follows the version: --experimental-permission before 22.13, --permission from 22.13 and 23', cjsRoot.nodePermissionFlag('20.20.2') === '--experimental-permission' && cjsRoot.nodePermissionFlag('22.12.0') === '--experimental-permission' && cjsRoot.nodePermissionFlag('22.13.0') === '--permission' && cjsRoot.nodePermissionFlag('24.14.0') === '--permission');
+  const env = cjsRoot.functionChildEnv({ PATH: '/bin', HOME: '/h', XORGATE_SECRET_A: 'x', NODE_OPTIONS: '--require evil', AWS_SECRET_ACCESS_KEY: 'y', FFMPEG_PATH: '/f', TZ: 'UTC' });
+  check('functionChildEnv keeps only the allowlist (PATH, HOME, TZ, ...): no XORGATE_SECRET_*, no NODE_OPTIONS, nothing else', JSON.stringify(env) === JSON.stringify({ PATH: '/bin', HOME: '/h', TZ: 'UTC' }), JSON.stringify(env));
+  check('root exports resolveFunctionCode, functionChildEnv, functionSpawnSpec, nodePermissionFlag', ['resolveFunctionCode', 'functionChildEnv', 'functionSpawnSpec', 'nodePermissionFlag'].every((n) => typeof cjsRoot[n] === 'function'));
 }
 
 // 5. No cloud-provider packages anywhere: package.json, lockfile, and the src/ tree.

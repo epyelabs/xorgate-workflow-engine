@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 2,
+  "nodes": [
+    {
+      "id": "src",
+      "type": "source.video",
+      "data": {
+        "label": "Video",
+        "config": {}
+      },
+      "position": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": "dec",
+      "type": "video.decode_sample",
+      "data": {
+        "label": "Decode & sample",
+        "config": {
+          "fps": 2
+        }
+      },
+      "position": {
+        "x": 200,
+        "y": 0
+      }
+    },
+    {
+      "id": "det",
+      "type": "model.object_detection",
+      "data": {
+        "label": "Forklift detector",
+        "config": {
+          "model": "acme-forklift",
+          "minConfidence": 0.4
+        }
+      },
+      "position": {
+        "x": 400,
+        "y": 0
+      }
+    },
+    {
+      "id": "fn",
+      "type": "function.python",
+      "data": {
+        "label": "Forklift summary",
+        "config": {
+          "handler": "handler",
+          "timeoutMs": 1000,
+          "memoryMb": 128,
+          "code": "def handler(event, context):\n    forklifts = [b for b in event[\"payload\"][\"boxes\"] if b[\"cls\"] == \"forklift\"]\n    if not forklifts:\n        return None\n    widest = max(forklifts, key=lambda b: b[\"xyxy\"][2] - b[\"xyxy\"][0])\n    return {\n        \"frameSeq\": event[\"payload\"][\"frameSeq\"],\n        \"count\": len(forklifts),\n        \"widestPx\": round(widest[\"xyxy\"][2] - widest[\"xyxy\"][0]),\n        \"confidence\": widest[\"confidence\"],\n    }\n",
+          "versions": [],
+          "deployedVersion": null
+        }
+      },
+      "position": {
+        "x": 600,
+        "y": 0
+      }
+    },
+    {
+      "id": "cap",
+      "type": "output.data_capture",
+      "data": {
+        "label": "Forklift summaries",
+        "config": {
+          "format": "jsonl"
+        }
+      },
+      "position": {
+        "x": 800,
+        "y": 0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "src",
+      "target": "dec"
+    },
+    {
+      "id": "e2",
+      "source": "dec",
+      "target": "det"
+    },
+    {
+      "id": "e3",
+      "source": "det",
+      "target": "fn",
+      "sourceHandle": "detections",
+      "targetHandle": "event"
+    },
+    {
+      "id": "e4",
+      "source": "fn",
+      "target": "cap",
+      "sourceHandle": "result",
+      "targetHandle": "records"
+    }
+  ]
+}

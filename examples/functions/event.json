@@ -1,0 +1,12 @@
+{
+  "tag": "detections",
+  "ts": 1786578991867,
+  "payload": {
+    "ts": 1786578991867,
+    "frameSeq": 3,
+    "boxes": [
+      { "cls": "forklift", "confidence": 0.81, "xyxy": [120, 200, 332, 410] },
+      { "cls": "pallet", "confidence": 0.77, "xyxy": [400, 380, 520, 440] }
+    ]
+  }
+}

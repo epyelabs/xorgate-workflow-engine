@@ -113,8 +113,15 @@ function checkCli(dir) {
   } else fail(`npx xwe run: exit ${r.status} ${r.stderr.trim().split('\n').at(-1)}`);
   const d = run('npx', ['--no-install', 'xwe', 'doctor'], { cwd: dir });
   const lines = d.stdout.trim().split('\n');
-  if (/^xwe \S+ \(node /.test(lines[0] ?? '') && lines.some((l) => l.includes('core e481243f5ffe4678'))) pass(`npx xwe doctor prints (exit ${d.status}):\n      ${lines.join('\n      ')}`);
+  if (/^xwe \S+ \(node /.test(lines[0] ?? '') && lines.some((l) => l.includes('core 08c8c39436928e5e')) && lines.some((l) => /^  python3 {11}/.test(l))) pass(`npx xwe doctor prints (exit ${d.status}):\n      ${lines.join('\n      ')}`);
   else fail(`npx xwe doctor: exit ${d.status}\n${d.stdout}${d.stderr}`);
+  // The function runtime from the installed package: both runners, through `xwe function test`.
+  for (const [tpl, lang] of [['forklift-summary.json', 'javascript'], ['forklift-summary-python.json', 'python']]) {
+    const f = run('npx', ['--no-install', 'xwe', 'function', 'test', tpl, 'fn', '--event', 'event.json'], { cwd: dir });
+    const expected = `ok      fn           function.${lang}  $LATEST  `;
+    if (f.status === 0 && f.stdout.startsWith(expected) && f.stdout.includes('\nresult: {"frameSeq":3,"count":1,"widestPx":212,"confidence":0.81}\nlogs: none\n')) pass(`npx xwe function test (${lang}) ran the installed runner: ${f.stdout.split('\n')[1]}`);
+    else fail(`npx xwe function test (${lang}): exit ${f.status}\n${f.stdout}${f.stderr}`);
+  }
 }
 
 try {
@@ -130,9 +137,9 @@ try {
   const forbidden = files.filter((p) => /^(fixtures|scripts|src|tools|out|docs|examples)\//.test(p) || p === 'Dockerfile' || /\.(onnx|mp4|ts)$/.test(p) && !/\.d\.ts$/.test(p));
   if (forbidden.length === 0) pass(`tarball has no fixtures/, scripts/, src/, tools/, Dockerfile, models or video (${files.length} files)`);
   else forbidden.forEach((p) => fail(`tarball contains ${p}`));
-  if (!files.some((p) => p.startsWith('tools/export/')) && !files.some((p) => /\.py$/.test(p))) pass('tarball has no tools/export (the Python export tools stay in the repository)');
-  else fail('tarball contains tools/export or a .py file');
-  for (const entry of ['dist/esm/index.js', 'dist/cjs/index.js', 'dist/esm/local/index.js', 'dist/cjs/local/index.js', 'dist/esm/testing/index.js', 'dist/cjs/testing/index.js', 'dist/cjs/cli/index.js', 'dist/esm/index.d.ts', 'dist/cjs/index.d.ts', 'LICENSE', 'README.md', 'CHANGELOG.md']) {
+  if (!files.some((p) => p.startsWith('tools/export/')) && files.filter((p) => /\.py$/.test(p)).join(',') === 'dist/runtime/python/runner.py') pass('tarball has no tools/export (the Python export tools stay in the repository); the only .py is the function runner');
+  else fail('tarball contains tools/export or a .py file other than dist/runtime/python/runner.py');
+  for (const entry of ['dist/esm/index.js', 'dist/cjs/index.js', 'dist/esm/local/index.js', 'dist/cjs/local/index.js', 'dist/esm/testing/index.js', 'dist/cjs/testing/index.js', 'dist/cjs/cli/index.js', 'dist/esm/index.d.ts', 'dist/cjs/index.d.ts', 'dist/runtime/js/runner.cjs', 'dist/runtime/python/runner.py', 'LICENSE', 'README.md', 'CHANGELOG.md']) {
     if (files.includes(entry)) pass(`${entry} is in the tarball`);
     else fail(`${entry} is advertised but not in the tarball`);
   }
@@ -153,7 +160,7 @@ try {
   else esmProblems.forEach(fail);
 
   // 4. Fresh project, default install: CLI, ESM, CJS, doctor, sizes, no cloud SDK.
-  const fixtures = [['fixtures/templates/overspeed.json', 'overspeed.json'], ['fixtures/telemetry/window.csv', 'window.csv']];
+  const fixtures = [['fixtures/templates/overspeed.json', 'overspeed.json'], ['fixtures/telemetry/window.csv', 'window.csv'], ['examples/functions/forklift-summary.json', 'forklift-summary.json'], ['examples/functions/forklift-summary-python.json', 'forklift-summary-python.json'], ['examples/functions/event.json', 'event.json']];
   const full = installProject('xwe-consumer-default', tarball, []);
   for (const [from, to] of fixtures) cpSync(join(root, from), join(full, to));
   const fullSize = dirSize(join(full, 'node_modules'));

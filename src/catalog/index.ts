@@ -4,6 +4,8 @@ import type { WorkflowCatalogPayload } from './serialize';
 import { ownPackageVersion } from '../engine/lazy-require';
 
 import * as connectorThirdParty from './nodes/connector-third-party';
+import * as functionJavascript from './nodes/function-javascript';
+import * as functionPython from './nodes/function-python';
 import * as logicBoolean from './nodes/logic-boolean';
 import * as logicComparator from './nodes/logic-comparator';
 import * as logicDebounce from './nodes/logic-debounce';
@@ -32,7 +34,7 @@ import * as videoScale from './nodes/video-scale';
 
 /**
  * The node catalog registry: the single source of truth for node types
- * (architecture.md §3). The core nodes are seven packs, one per namespace,
+ * (architecture.md §3). The core nodes are eight packs, one per namespace,
  * built into `coreCatalog` at module load; a broken def fails cold start
  * loudly rather than serving a bad catalog. The module-level functions below
  * are the core catalog's, for the callers that never compose packs; every
@@ -48,10 +50,12 @@ function corePack(namespace: string, nodes: NodePackNode[]): NodePack {
 }
 
 /**
- * The seven core packs, one per core namespace, in the registry's historical
- * order (so `listNodeTypes()` lists the 26 nodes as it always has). Compose a
- * subset with `createCatalog` for a host that cannot run a group, for example
- * every pack but `core/model` on a target without ONNX Runtime.
+ * The eight core packs, one per core namespace, in the registry's historical
+ * order (so `listNodeTypes()` lists the 26 pre-0.2.0 nodes as it always has,
+ * then the two function nodes). Compose a subset with `createCatalog` for a
+ * host that cannot run a group, for example every pack but `core/model` on a
+ * target without ONNX Runtime, or every pack but `core/function` on a host
+ * that must not spawn processes.
  */
 export const corePacks: ReadonlyArray<NodePack> = Object.freeze([
   corePack('source', [sourceVideo, sourceTelemetry]),
@@ -77,6 +81,7 @@ export const corePacks: ReadonlyArray<NodePack> = Object.freeze([
     logicProximityGate,
   ]),
   corePack('output', [outputDataCapture, outputEvent, outputVisualization]),
+  corePack('function', [functionJavascript, functionPython]),
 ]);
 
 /** The catalog of exactly the core packs; what every entry point defaults to. */

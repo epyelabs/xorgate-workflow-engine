@@ -308,6 +308,7 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
     const inputs = inChannelsByNode.get(nodeId)!;
     const started = Date.now();
     let seq = 0;
+    let recordSeq = 0;
     try {
       const parsedConfig = typeDef.config.safeParse(node.data.config ?? {});
       if (!parsedConfig.success) {
@@ -341,7 +342,11 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
         },
         secrets: secrets ?? null,
         http: deps.httpFetch ?? fetch,
-        log: (message) => log(`${nodeId}: ${message}`),
+        log: (message, level = 'info') => log(`${nodeId}: ${message}`, level),
+        emitRecord: (rec) => {
+          if (state.aborted || !progress?.record) return;
+          progress.record({ nodeId, port: rec.port, tag: rec.tag, ts: rec.ts, seq: recordSeq++, payload: rec.payload });
+        },
       };
 
       const iterator = executor(inputs, parsedConfig.data, ctx)[Symbol.asyncIterator]();

@@ -12,8 +12,10 @@
 #     run fixtures/templates/overspeed.json \
 #     --input telemetry=fixtures/telemetry/window.csv --out out
 #
-# ffmpeg comes from apt (the executors spawn `ffmpeg`; FFMPEG_PATH is only for
-# dev machines). onnxruntime-node ships a prebuilt binding for every platform
+# ffmpeg and python3 come from apt (the executors spawn `ffmpeg`; FFMPEG_PATH
+# is only for dev machines; `function.python` nodes spawn `python3` from PATH,
+# the JavaScript ones the image's own node with its permission model on).
+# onnxruntime-node ships a prebuilt binding for every platform
 # and architecture (about 280 MB); the runtime stage keeps only this image's
 # (linux/<arch>). No model is baked in: models resolve from the mounted
 # workspace via --models-dir, the cache (mount a volume at /root/.xorgate/models),
@@ -32,8 +34,9 @@ WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json tsconfig.esm.json tsconfig.cjs.json ./
-COPY scripts/finalize-build.mjs ./scripts/
+COPY scripts/finalize-build.mjs scripts/copy-runtime.mjs ./scripts/
 COPY src ./src
+COPY runtime ./runtime
 RUN npm run build
 
 FROM node:20-slim
@@ -43,7 +46,7 @@ ENV NODE_ENV=production \
     OMP_NUM_THREADS=2
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

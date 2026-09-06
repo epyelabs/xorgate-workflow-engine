@@ -1,7 +1,7 @@
 {
   "name": "@xorgate/workflow-engine",
   "version": "0.2.0-dev",
-  "description": "The xorgate workflow engine as a library and the xwe command: run workflow templates over video and telemetry files with a 26-node catalog, no platform account required.",
+  "description": "The xorgate workflow engine as a library and the xwe command: run workflow templates over video and telemetry files with a 28-node catalog, including code function nodes, no platform account required.",
   "license": "MIT",
   "author": "Epye Labs",
   "homepage": "https://docs.xorgate.io/docs/workflows",
@@ -79,9 +79,10 @@
   "scripts": {
     "clean": "rm -rf dist",
     "fixtures:pull": "node scripts/fixtures/pull.mjs",
-    "build": "npm run clean && npm run build:esm && npm run build:cjs && node scripts/finalize-build.mjs",
+    "build": "npm run clean && npm run build:esm && npm run build:cjs && node scripts/finalize-build.mjs && npm run build:runtime",
     "build:esm": "tsc -p tsconfig.esm.json",
     "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build:runtime": "node scripts/copy-runtime.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepack": "npm run build",
     "smoke": "npm run fixtures:pull && npm run build && node scripts/smoke.mjs",

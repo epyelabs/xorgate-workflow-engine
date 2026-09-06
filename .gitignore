@@ -11,3 +11,4 @@ fixtures/models/
 
 # Local registry mirror built by scripts/registry-sync.mjs for tests and docs
 registry-mirror/
+__pycache__/

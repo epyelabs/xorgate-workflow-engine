@@ -486,7 +486,16 @@ export interface EngineRunCtx {
   captureRecord(record: unknown): void;
   /** Human one-liner for the node's step row (last call wins). */
   setSummary(summary: string): void;
-  log(message: string): void;
+  /** A diagnostic line; `level` (additive, distribution M7) defaults to `info`. */
+  log(message: string, level?: 'info' | 'debug'): void;
+  /**
+   * Tees a json record to the progress sink without emitting it on an output
+   * port (additive, distribution M7): function nodes report their log lines
+   * this way, as `record` messages on the pseudo-port `log`, tagged `log`,
+   * with `{ line, invocation }` as the payload. Absent on engines older than
+   * 0.2.0; a node checks before calling.
+   */
+  emitRecord?(rec: { port: string; tag: string; ts: number; payload: unknown }): void;
 }
 
 /**

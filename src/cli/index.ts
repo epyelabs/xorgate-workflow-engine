@@ -22,6 +22,7 @@ import { loadPacks } from './packs';
  *           [--progress json] [--emit-video] [--window from,to] [--pack module]...
  *   xwe run --manifest <manifest.json> [same flags]
  *   xwe models list | pull <family>/<name>[@v] | path <family>/<name>[@v] | check <dir>
+ *   xwe function test <template.json> <nodeId> --event <event.json> [--version n]
  *   xwe doctor [--models-dir dir]...
  *   --log-level silent|error|info|debug on any command (default info)
  *
@@ -35,6 +36,7 @@ const USAGE = `usage:
   xwe run <template.json> --input <key>=<path> ... [options]
   xwe run --manifest <manifest.json> [options]
   xwe models list | pull <family>/<name>[@<version>] | path <family>/<name>[@<version>] | check <dir>
+  xwe function test <template.json> <nodeId> --event <event.json> [--version <n>]
   xwe doctor [--models-dir <dir>]...
 
 options:
@@ -48,6 +50,8 @@ options:
   --emit-video           mux visualization frames into out/<runId>/video/<nodeId>.mp4
   --window <from>,<to>   ISO run window (rarely needed locally)
   --pack <module>        register a node pack (an npm package name or a path, resolved from cwd); repeatable
+  --event <file>         function test: the event to run through the handler ({ "tag"?, "ts"?, "payload" })
+  --version <n>          function test: run a published snapshot instead of the working copy
   --log-level <level>    stderr verbosity on any command: silent | error | info (default) | debug`;
 
 let logger: Logger = createLogger('info');
@@ -218,6 +222,46 @@ async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promis
   return 0;
 }
 
+/**
+ * `xwe function test <template> <nodeId> --event <file> [--version n]`: one
+ * event through the node's handler in the run's sandboxed runtime. The
+ * report goes to stdout; exit 0 when the handler answered, 1 when it threw,
+ * timed out or failed to load, 2 when nothing ran.
+ */
+async function cmdFunctionTest(
+  templatePath: string | undefined,
+  nodeId: string | undefined,
+  flags: { event?: string; version?: string },
+): Promise<number> {
+  if (!templatePath || !nodeId) fail(`function test needs a template path and a node id\n${USAGE}`);
+  if (!flags.event) fail('function test needs --event <file>');
+  let version: number | undefined;
+  if (flags.version !== undefined) {
+    version = Number(flags.version);
+    if (!Number.isInteger(version) || version <= 0) fail(`--version must be a positive integer, got "${flags.version}"`);
+  }
+  const engine = createEngine({
+    host: localHost({ log: (m) => logger.info(`[xwe] ${m}`) }),
+    log: (m, level) => logger[level](`[engine] ${m}`),
+  });
+  const test = await engine.testFunction({
+    template: templatePath,
+    nodeId,
+    event: flags.event,
+    ...(version !== undefined ? { version } : {}),
+  });
+  const label = test.functionVersion === '$LATEST' ? '$LATEST' : `v${test.functionVersion}`;
+  console.log(`${(test.ok ? 'ok' : 'failed').padEnd(7)} ${test.nodeId.padEnd(12)} ${test.type}  ${label}  ${test.durationMs} ms`);
+  if (test.ok) console.log(`result: ${test.result === null ? 'null (dropped)' : JSON.stringify(test.result)}`);
+  else console.log(`error: ${test.error}`);
+  if (test.logs.length === 0) console.log('logs: none');
+  else {
+    console.log('logs:');
+    for (const line of test.logs) console.log(`  ${line}`);
+  }
+  return test.ok ? 0 : 1;
+}
+
 async function cmdDoctor(modelDirs: string[]): Promise<number> {
   const report = await doctorReport({ modelDirs });
   for (const line of report.lines) console.log(line);
@@ -277,6 +321,16 @@ async function main(): Promise<number> {
   if (command === 'models') {
     // `xwe:` lines are failures; `[xwe]` lines are the pull narrative.
     return runModelsCommand(rest, { stderr: (line) => (line.startsWith('xwe:') ? logger.error(line) : logger.info(line)) });
+  }
+  if (command === 'function') {
+    const [sub, ...args] = rest;
+    if (sub !== 'test') fail(`function takes the subcommand "test"\n${USAGE}`);
+    const { values, positionals } = parseArgs({
+      args,
+      allowPositionals: true,
+      options: { event: { type: 'string' }, version: { type: 'string' } },
+    });
+    return cmdFunctionTest(positionals[0], positionals[1], { event: values.event, version: values.version });
   }
   if (command === 'doctor') {
     const { values } = parseArgs({

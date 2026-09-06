@@ -8,7 +8,20 @@
 
 // High level
 export { createEngine, XweUsageError, resolveRunManifest } from './create-engine';
-export type { CreateEngineOptions, Engine, EngineRunOptions, EngineRunResult } from './create-engine';
+export type {
+  CreateEngineOptions,
+  Engine,
+  EngineRunOptions,
+  EngineRunResult,
+  FunctionTestEvent,
+  FunctionTestResult,
+  TestFunctionOptions,
+} from './create-engine';
+// Code function nodes (distribution M7): the environment their runners get and the version rule.
+export { functionChildEnv, functionSpawnSpec, nodePermissionFlag } from './engine/function-runtime';
+export type { FunctionLanguage } from './engine/function-runtime';
+export { resolveFunctionCode, FUNCTION_CODE_MAX_BYTES } from './catalog/nodes/function-common';
+export type { FunctionConfig, FunctionVersionSnapshot, ResolvedFunctionCode } from './catalog/nodes/function-common';
 export type { EngineHost, EngineHostBindArgs, EngineBoundRun } from './host';
 export type { LogLevel, LogSink, MessageLevel } from './engine/log';
 export { LOG_LEVELS } from './engine/log';
