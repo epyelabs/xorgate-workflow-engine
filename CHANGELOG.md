@@ -6,6 +6,11 @@ version number follows the policy in [docs/compatibility.md](./docs/compatibilit
 
 ## Unreleased
 
+Work towards 0.2.0: code function nodes (`function.javascript`,
+`function.python`), the function runtime and `xwe function test`. The core
+catalog hash moves on purpose when the two nodes land; both hashes are named
+here at release time.
+
 ## 0.1.0 (2026-09-05)
 
 The first published release: the engine that ran from a checkout, packaged.
