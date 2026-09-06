@@ -4,7 +4,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
-## 0.2.0 (in preparation)
+## 0.2.0 (2026-09-06)
 
 Code function nodes. Core catalog `catalogVersion` moves from
 `e481243f5ffe4678` (0.1.0, 26 nodes) to `08c8c39436928e5e` (28 nodes): a
