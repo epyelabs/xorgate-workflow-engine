@@ -447,7 +447,12 @@ export async function* runFunctionNode(
       invocations += 1;
       const r = await proc.invoke({ tag: msg.tag, ts: msg.ts, seq: msg.seq, payload: msg.payload });
       handlerMs += r.durationMs;
-      if (!r.ok) throw new Error(formatInvocationFailure(r));
+      if (!r.ok) {
+        // The elapsed time is measured from the event being written to the
+        // runner; for a timeout it is how long the deadline took to bite.
+        ctx.log(`invocation ${r.invocation} failed after ${r.durationMs} ms: ${r.error}`, 'debug');
+        throw new Error(formatInvocationFailure(r));
+      }
       if (r.dropped) {
         dropped += 1;
         continue;
