@@ -24,7 +24,7 @@ const NATIVE_RE = /node_modules[\\/](onnxruntime-node|@anthropic-ai)[\\/]/;
 const cjsRoot = require(join(root, 'dist/cjs/index.js'));
 const cjsLocal = require(join(root, 'dist/cjs/local/index.js'));
 const cjsTesting = require(join(root, 'dist/cjs/testing/index.js'));
-for (const name of ['createEngine', 'runGraph', 'validateDefinition', 'inspectTemplate', 'upgradeDefinition', 'listNodeTypes', 'buildCatalogPayload', 'defineNode', 'XweUsageError']) {
+for (const name of ['createEngine', 'runGraph', 'validateDefinition', 'inspectTemplate', 'upgradeDefinition', 'listNodeTypes', 'buildCatalogPayload', 'defineNode', 'XweUsageError', 'IotRunProgress', 'teeArtifactSink', 'simTopicPrefix', 'runTopicPrefix', 'manifestKey', 'resultKey', 'eventsKey', 'recordsKey', 'frameKey', 'inputRecordsKey', 'captureFormatsOf', 'buildGoogleRoadsUrl', 'parseGoogleRoadsResponse', 'buildHereRequest', 'parseHereResponse', 'buildOverpassRequest', 'parseOverpassResponse', 'parseMaxspeedTag']) {
   check(`cjs root exports ${name}`, typeof cjsRoot[name] === 'function');
 }
 for (const name of ['localHost', 'localSources', 'localArtifactSink', 'localSecretReader', 'ndjsonProgress', 'writeRunArtifacts', 'buildResult', 'emitVideo']) {
@@ -51,7 +51,7 @@ const esmProbe = spawnSync(
     let stub = '';
     try { await testing.runConformance({}); } catch (e) { stub = e.name + ':' + e.exitCode; }
     console.log(JSON.stringify({
-      root: ['createEngine', 'runGraph', 'validateDefinition', 'inspectTemplate'].every((n) => typeof root[n] === 'function'),
+      root: ['createEngine', 'runGraph', 'validateDefinition', 'inspectTemplate', 'IotRunProgress', 'manifestKey', 'captureFormatsOf', 'buildHereRequest'].every((n) => typeof root[n] === 'function') && typeof root.simPreviewPayloadSchema?.safeParse === 'function' && root.V2_RUN_PREFIX === 'workflows/v2/runs/',
       local: ['localHost', 'writeRunArtifacts', 'emitVideo'].every((n) => typeof local[n] === 'function'),
       native, stub,
     }));
@@ -66,7 +66,7 @@ try {
   // reported below
 }
 check('esm entry points load', esm !== null, esmProbe.stderr.trim().split('\n').at(-1) ?? '');
-check('esm root exports createEngine/runGraph/validateDefinition/inspectTemplate', esm?.root === true);
+check('esm root exports createEngine/runGraph/validateDefinition/inspectTemplate and the 0.3.0 platform-shell names', esm?.root === true);
 check('esm local exports localHost/writeRunArtifacts/emitVideo', esm?.local === true);
 check('esm: importing the three entry points loads no native module', esm?.native === false);
 check('esm testing.runConformance without a host rejects with XweUsageError (exit code 2), running nothing', esm?.stub === 'XweUsageError:2', esm?.stub);
@@ -172,6 +172,42 @@ check(
   const env = cjsRoot.functionChildEnv({ PATH: '/bin', HOME: '/h', XORGATE_SECRET_A: 'x', NODE_OPTIONS: '--require evil', AWS_SECRET_ACCESS_KEY: 'y', FFMPEG_PATH: '/f', TZ: 'UTC' });
   check('functionChildEnv keeps only the allowlist (PATH, HOME, TZ, ...): no XORGATE_SECRET_*, no NODE_OPTIONS, nothing else', JSON.stringify(env) === JSON.stringify({ PATH: '/bin', HOME: '/h', TZ: 'UTC' }), JSON.stringify(env));
   check('root exports resolveFunctionCode, functionChildEnv, functionSpawnSpec, nodePermissionFlag', ['resolveFunctionCode', 'functionChildEnv', 'functionSpawnSpec', 'nodePermissionFlag'].every((n) => typeof cjsRoot[n] === 'function'));
+}
+
+// 4e. Platform-shell exports (0.3.0): the reference progress transport, the
+// artifact key helpers, the capture-format rule and the connector request
+// builders reach the root entry point; the two former internal files are gone.
+{
+  check('root exports simPreviewPayloadSchema and V2_RUN_PREFIX', typeof cjsRoot.simPreviewPayloadSchema?.safeParse === 'function' && cjsRoot.V2_RUN_PREFIX === 'workflows/v2/runs/');
+  check('key helpers name the artifact tree under workflows/v2/runs/<runId>/', cjsRoot.manifestKey('r1') === 'workflows/v2/runs/r1/manifest.json' && cjsRoot.resultKey('r1') === 'workflows/v2/runs/r1/result.json' && cjsRoot.eventsKey('r1') === 'workflows/v2/runs/r1/events.jsonl' && cjsRoot.recordsKey('r1', 'n3', 'json') === 'workflows/v2/runs/r1/outputs/n3/records.json' && cjsRoot.frameKey('r1', 'n5', 7) === 'workflows/v2/runs/r1/frames/n5/7.jpg' && cjsRoot.inputRecordsKey('r1', 'n1') === 'workflows/v2/runs/r1/inputs/n1/records.jsonl' && cjsRoot.runPrefix('r1') === 'workflows/v2/runs/r1/');
+  check('simTopicPrefix / runTopicPrefix lay out wf/sim and wf/run per org and run', cjsRoot.simTopicPrefix('org', 'run') === 'wf/sim/org/run' && cjsRoot.runTopicPrefix('org', 'run') === 'wf/run/org/run');
+  const published = [];
+  const progress = new cjsRoot.IotRunProgress({ runId: 'smoke-progress', topicPrefix: cjsRoot.simTopicPrefix('org', 'smoke-progress'), publish: async (topic, payload) => { published.push([topic, JSON.parse(payload)]); }, log: () => {} });
+  progress.runStatus({ status: 'running' });
+  progress.step({ seq: 0, nodeId: 'n1', label: 'T', status: 'ok', output: '1 sample', durationMs: 1 });
+  progress.event({ kind: 'overspeed', occurredAt: '2026-08-12T23:56:01.289Z', confidence: 1, payloadSummary: 'x' });
+  progress.record({ nodeId: 'n2', port: 'out', ts: 1, seq: 0, payload: { a: 1 } });
+  progress.runStatus({ status: 'succeeded' });
+  await progress.flush();
+  const topics = published.map(([t]) => t).join(' ');
+  const parsed = published.every(([t, p]) => (t.endsWith('/status') ? cjsRoot.simStatusPayloadSchema : t.endsWith('/steps') ? cjsRoot.simStepPayloadSchema : t.endsWith('/events') ? cjsRoot.simEventPayloadSchema : cjsRoot.simRecordPayloadSchema).safeParse(p).success);
+  check('IotRunProgress publishes status/steps/events/records/<nodeId> in order, payloads parsing with the sim*PayloadSchema', topics === 'wf/sim/org/smoke-progress/status wf/sim/org/smoke-progress/steps wf/sim/org/smoke-progress/events wf/sim/org/smoke-progress/records/n2 wf/sim/org/smoke-progress/status' && parsed && published[0][1].status === 'running' && published[4][1].status === 'succeeded', topics);
+  const frames = [];
+  const teed = cjsRoot.teeArtifactSink({ putFrame: async (nodeId, seq) => { frames.push(`${nodeId}/${seq}`); return `k/${nodeId}/${seq}`; } }, progress);
+  const key = await teed.putFrame('viz', 3, Buffer.from('not a jpeg'));
+  await progress.flush();
+  check('teeArtifactSink writes through to the inner sink (its key wins) and previews best-effort (a bad JPEG is logged, not thrown)', key === 'k/viz/3' && frames.join() === 'viz/3');
+  const def = { schemaVersion: 2, nodes: [
+    { id: 'a', type: 'output.data_capture', position: { x: 0, y: 0 }, data: { label: 'A', config: { format: 'json' } } },
+    { id: 'b', type: 'output.data_capture', position: { x: 0, y: 0 }, data: { label: 'B', config: {} } },
+    { id: 'c', type: 'source.telemetry', position: { x: 0, y: 0 }, data: { label: 'C', config: {} } },
+  ], edges: [] };
+  check('captureFormatsOf (root and ./local are the same function) maps each data_capture node to jsonl unless json is configured', cjsRoot.captureFormatsOf === cjsLocal.captureFormatsOf && JSON.stringify(cjsRoot.captureFormatsOf(def)) === JSON.stringify({ a: 'json', b: 'jsonl' }));
+  const here = cjsRoot.buildHereRequest(43.6, -79.5, 'KEY');
+  const overpass = cjsRoot.buildOverpassRequest(43.6, -79.5);
+  check('connector request builders: Google Roads URL carries the rounded position and the key; HERE and Overpass return { url, init }', cjsRoot.buildGoogleRoadsUrl(43.6, -79.5, 'K') === 'https://roads.googleapis.com/v1/speedLimits?path=43.6000%2C-79.5000&units=KPH&key=K' && here.url.startsWith('https://routematching.hereapi.com/v8/match/routelinks?') && here.url.includes('apikey=KEY') && typeof here.init === 'object' && overpass.url === 'https://overpass-api.de/api/interpreter' && overpass.init.headers['User-Agent'].startsWith('xorgate-workflows/2'));
+  check('connector response parsers: Roads, HERE and Overpass answers reduce to { speedLimitKph, placeId? }; parseMaxspeedTag reads km/h and mph', JSON.stringify(cjsRoot.parseGoogleRoadsResponse({ speedLimits: [{ placeId: 'p', speedLimit: 50, units: 'KPH' }] })) === JSON.stringify({ speedLimitKph: 50, placeId: 'p' }) && cjsRoot.parseOverpassResponse({ elements: [{ tags: { maxspeed: '30 mph' } }] }).speedLimitKph === 48 && cjsRoot.parseHereResponse({}).speedLimitKph === null && cjsRoot.parseMaxspeedTag('60') === 60 && cjsRoot.parseMaxspeedTag('nope') === null);
+  check('dist/cjs/engine and dist/esm/engine no longer ship session.js or finalize.js (moved to the platform shell)', ['cjs', 'esm'].every((f) => !existsSync(join(root, `dist/${f}/engine/session.js`)) && !existsSync(join(root, `dist/${f}/engine/finalize.js`))));
 }
 
 // 5. No cloud-provider packages anywhere: package.json, lockfile, and the src/ tree.

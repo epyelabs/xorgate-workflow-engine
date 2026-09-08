@@ -109,7 +109,7 @@ export function buildGoogleRoadsUrl(lat: number, lng: number, apiKey: string): s
   return `${GOOGLE_ROADS_URL}?path=${roundCoord(lat)}%2C${roundCoord(lng)}&units=KPH&key=${encodeURIComponent(apiKey)}`;
 }
 
-interface RoadsResponse {
+export interface RoadsResponse {
   speedLimits?: Array<{ placeId?: string; speedLimit?: number; units?: string }>;
   snappedPoints?: Array<{ placeId?: string; originalIndex?: number }>;
 }
@@ -153,7 +153,7 @@ export function buildHereRequest(
   };
 }
 
-interface HereRouteMatchResponse {
+export interface HereRouteMatchResponse {
   response?: {
     route?: Array<{
       leg?: Array<{
@@ -229,7 +229,7 @@ export function parseMaxspeedTag(value: string | undefined): number | null {
   return null;
 }
 
-interface OverpassResponse {
+export interface OverpassResponse {
   elements?: Array<{ tags?: Record<string, string> }>;
 }
 
