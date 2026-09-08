@@ -130,3 +130,36 @@ export {
   simStepPayloadSchema,
 } from './engine/progress';
 export type { SimEventPayload, SimRecordPayload, SimStatusPayload, SimStepPayload } from './engine/progress';
+
+// The platform shell and any other remote host (0.3.0): the reference
+// progress transport and its topic layout, the artifact key helpers behind
+// the artifact tree, the capture-format rule, and the connector request
+// builders. All additive; nothing here loads a native module or a cloud SDK.
+export { IotRunProgress, runTopicPrefix, simPreviewPayloadSchema, simTopicPrefix, teeArtifactSink } from './engine/progress';
+export type { ProgressTransport, SimPreviewPayload } from './engine/progress';
+export {
+  V2_RUN_PREFIX,
+  eventsKey,
+  frameKey,
+  inputRecordsKey,
+  manifestKey,
+  recordsKey,
+  resultKey,
+} from './engine/manifest';
+export { captureFormatsOf } from './local/capture-formats';
+export {
+  buildGoogleRoadsUrl,
+  buildHereRequest,
+  buildOverpassRequest,
+  parseGoogleRoadsResponse,
+  parseHereResponse,
+  parseMaxspeedTag,
+  parseOverpassResponse,
+} from './catalog/nodes/connector-third-party';
+export type {
+  HereRouteMatchResponse,
+  OverpassResponse,
+  RoadsResponse,
+  SpeedLimitLookup,
+  SpeedLimitProvider,
+} from './catalog/nodes/connector-third-party';

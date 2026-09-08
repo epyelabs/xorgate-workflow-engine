@@ -4,6 +4,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
+## 0.3.0 (2026-09-08)
+
+Exports for a platform shell. No node definition, executor or contract
+changes; the core catalog stays at `08c8c39436928e5e` (28 nodes). A minor
+under the policy in `docs/compatibility.md`: new exports only.
+
+### Added
+
+- Root exports for hosts that publish progress to a topic plane and keep
+  artifacts under the v2 run prefix (the platform's shell is the first):
+  `IotRunProgress` (the reference `EngineProgressSink` over a
+  `ProgressTransport`, one publish chain per run, records and previews paced
+  and size-capped, `flush()` after the run), `teeArtifactSink`,
+  `simTopicPrefix`, `runTopicPrefix`, `simPreviewPayloadSchema` and the
+  types `ProgressTransport`, `SimPreviewPayload`.
+- The artifact key helpers behind the artifact tree: `V2_RUN_PREFIX`,
+  `manifestKey`, `resultKey`, `eventsKey`, `recordsKey`, `frameKey`,
+  `inputRecordsKey` (`runPrefix` was already exported).
+- `captureFormatsOf` from the root entry point (unchanged on `./local`).
+- The connector request builders and parsers, so a shell can probe a
+  provider credential with the exact requests the node makes:
+  `buildGoogleRoadsUrl`, `parseGoogleRoadsResponse`, `buildHereRequest`,
+  `parseHereResponse`, `buildOverpassRequest`, `parseOverpassResponse`,
+  `parseMaxspeedTag`, and the types `SpeedLimitProvider`, `SpeedLimitLookup`,
+  `RoadsResponse`, `HereRouteMatchResponse`, `OverpassResponse`.
+- `npm run smoke` asserts every new name on both module formats, exercises
+  `IotRunProgress` through an in-memory transport and checks the key layout.
+
+### Removed
+
+- The internal files `engine/session.ts` and `engine/finalize.ts`. They were
+  never exported or referenced (deep imports are not a contract); the
+  platform shell that used them takes them over.
+
 ## 0.2.0 (2026-09-06)
 
 Code function nodes. Core catalog `catalogVersion` moves from
