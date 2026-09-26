@@ -4,7 +4,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
-## Unreleased (0.4.0)
+## 0.4.0 (2026-09-26)
 
 Metric depth and a distance label. A minor under the policy in
 `docs/compatibility.md`: additive config fields and values, additive payload
