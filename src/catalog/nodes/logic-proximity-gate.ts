@@ -11,6 +11,11 @@ import { defineNode } from '../types';
 // Emits one condition per depth record (recordless/box-less frames emit
 // false), so downstream boolean/debounce/event stay ts-aligned with frames.
 //
+// 0.4.0 (additive): `maxDistanceM` switches the test to metres. With a metric
+// depth model upstream, boxes carry `distanceM` and a box matches when it is
+// within that distance; `minProximity` is then ignored. On a relative model
+// (no distanceM) the node fails loudly instead of never firing.
+//
 // CPU depth is RELATIVE (per-frame normalized), so minProximity is a relative
 // closeness threshold, not meters; metric depth arrives with the GPU backend.
 
@@ -37,6 +42,11 @@ const configSchema = z.object({
     .min(1)
     .default(1)
     .describe('How many matching objects must be that close'),
+  maxDistanceM: z
+    .number()
+    .positive()
+    .optional()
+    .describe('Metric depth models only: true when a matching object is within this many metres (replaces Min Proximity)'),
 });
 
 export const def = defineNode({
@@ -80,17 +90,24 @@ export const executor = async function* logicProximityGate(
       );
     }
     const boxes = Array.isArray(depth.boxes) ? depth.boxes : [];
+    if (cfg.maxDistanceM !== undefined && boxes.length > 0 && boxes[0].distanceM === undefined) {
+      throw new Error(
+        'Proximity Gate maxDistanceM needs metric depth: pick a metric model (e.g. depth-anything-v2-metric-outdoor-small) on the upstream Depth Estimation node',
+      );
+    }
+    const close = (b: (typeof boxes)[number]) =>
+      cfg.maxDistanceM !== undefined ? (b.distanceM ?? Infinity) <= cfg.maxDistanceM : b.proximity >= cfg.minProximity;
     const matched = boxes.filter(
-      (b) =>
-        b.confidence >= cfg.minConfidence &&
-        (classFilter.size === 0 || classFilter.has(b.cls)) &&
-        b.proximity >= cfg.minProximity,
+      (b) => b.confidence >= cfg.minConfidence && (classFilter.size === 0 || classFilter.has(b.cls)) && close(b),
     );
     const value = matched.length >= cfg.minCount;
     frames += 1;
     if (value) trueFrames += 1;
-    const nearest = boxes.reduce<{ cls: string; proximity: number } | null>(
-      (acc, b) => (acc === null || b.proximity > acc.proximity ? { cls: b.cls, proximity: b.proximity } : acc),
+    const nearest = boxes.reduce<{ cls: string; proximity: number; distanceM?: number } | null>(
+      (acc, b) =>
+        acc === null || b.proximity > acc.proximity
+          ? { cls: b.cls, proximity: b.proximity, ...(b.distanceM !== undefined ? { distanceM: b.distanceM } : {}) }
+          : acc,
       null,
     );
     yield {
@@ -102,14 +119,16 @@ export const executor = async function* logicProximityGate(
           observed: matched.length,
           minCount: cfg.minCount,
           minProximity: cfg.minProximity,
+          ...(cfg.maxDistanceM !== undefined ? { maxDistanceM: cfg.maxDistanceM } : {}),
           classes: cfg.classes,
           frameSeq: depth.frameSeq,
           nearest,
-          boxes: matched.slice(0, MAX_META_BOXES).map(({ cls, confidence, xyxy, proximity }) => ({
+          boxes: matched.slice(0, MAX_META_BOXES).map(({ cls, confidence, xyxy, proximity, distanceM }) => ({
             cls,
             confidence,
             xyxy,
             proximity,
+            ...(distanceM !== undefined ? { distanceM } : {}),
           })),
         },
       },

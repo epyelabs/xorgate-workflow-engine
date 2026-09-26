@@ -53,6 +53,12 @@ const configSchema = z.object({
     .boolean()
     .default(true)
     .describe('Render colormapped depth frames for preview and review'),
+  distanceScale: z
+    .number()
+    .positive()
+    .max(10)
+    .default(1)
+    .describe('Metric models only: multiplies every distance. Calibrate per camera: a known distance divided by the reported one'),
 });
 
 export const def = defineNode({
@@ -81,6 +87,11 @@ export const def = defineNode({
   requires: [],
   runtime: { target: 'media', gpuPreferred: false, modelRef: { family: 'depth' } },
 });
+
+function scaleMetres(m: { min: number; median: number; max: number }, scale: number) {
+  const s = (v: number) => Number((v * scale).toFixed(2));
+  return { min: s(m.min), median: s(m.median), max: s(m.max) };
+}
 
 // Embedded-map budget: 160 wide keeps a jsonl record around 30 KB (base64)
 // while a box spanning a tenth of the frame still covers hundreds of cells.
@@ -157,7 +168,9 @@ export const executor = async function* modelDepth(
       boxes = detBoxes.map((b) => ({
         ...b,
         proximity: medianDepthInBox(map, b.xyxy, frame.width, frame.height),
-        ...(metric ? { distanceM: medianMetresInBox(raw, mw, mh, b.xyxy, frame.width, frame.height) } : {}),
+        ...(metric
+          ? { distanceM: Number((medianMetresInBox(raw, mw, mh, b.xyxy, frame.width, frame.height) * cfg.distanceScale).toFixed(2)) }
+          : {}),
       }));
     }
 
@@ -182,7 +195,7 @@ export const executor = async function* modelDepth(
         data: Buffer.from(embed.values).toString('base64'),
       },
       ...(boxes !== undefined ? { boxes } : {}),
-      ...(metric ? { metres: metresStats(raw) } : {}),
+      ...(metric ? { metres: scaleMetres(metresStats(raw), cfg.distanceScale) } : {}),
     };
     yield { ch: 'json' as const, tag: 'depth', ts: msg.ts, payload };
   }

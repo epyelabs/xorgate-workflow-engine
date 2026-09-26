@@ -138,12 +138,12 @@ check(
   check('corePacks are eight packs totalling 28 nodes, core/function last with the two function nodes', cjsRoot.corePacks.length === 8 && cjsRoot.corePacks.reduce((n, p) => n + p.nodes.length, 0) === 28 && cjsRoot.corePacks[7].name === 'core/function' && cjsRoot.corePacks[7].nodes.map((n) => n.def.type).join(',') === 'function.javascript,function.python', cjsRoot.corePacks.map((p) => `${p.name}:${p.nodes.length}`).join(' '));
   check('payload.packs is one core entry whose hash is catalogVersion (no packs registered)', Array.isArray(payload.packs) && payload.packs.length === 1 && payload.packs[0].name === 'core' && payload.packs[0].hash === payload.catalogVersion && payload.packs[0].version === JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version, JSON.stringify(payload.packs));
   // The core hash moves on purpose on minors (docs/compatibility.md): 0.2.0 added the two
-  // function nodes (08c8c39436928e5e); 0.4.0 added the `distance` overlay to
-  // output.visualization's config enum (6c5db917af76c5b9). Without core/function the 26
-  // older defs hash to b554df4c23d4e892 (0.1.0-0.3.0: e481243f5ffe4678).
-  check('catalogVersion is the 0.4.0 core hash 6c5db917af76c5b9', payload.catalogVersion === '6c5db917af76c5b9', payload.catalogVersion);
+  // function nodes (08c8c39436928e5e); 0.4.0 added output.visualization's `distance`
+  // overlay, model.depth's distanceScale and proximity_gate's maxDistanceM (2b2a3c052696cf1e). Without core/function the 26
+  // older defs hash to ab458ea46642308b (0.1.0-0.3.0: e481243f5ffe4678).
+  check('catalogVersion is the 0.4.0 core hash 2b2a3c052696cf1e', payload.catalogVersion === '2b2a3c052696cf1e', payload.catalogVersion);
   const withoutFunctions = cjsRoot.buildCatalogPayload(cjsRoot.createCatalog(cjsRoot.corePacks.filter((p) => p.name !== 'core/function')));
-  check('without core/function the 26 non-function defs hash to 0.4.0\'s b554df4c23d4e892', withoutFunctions.nodes.length === 26 && withoutFunctions.catalogVersion === 'b554df4c23d4e892', withoutFunctions.catalogVersion);
+  check('without core/function the 26 non-function defs hash to 0.4.0\'s ab458ea46642308b', withoutFunctions.nodes.length === 26 && withoutFunctions.catalogVersion === 'ab458ea46642308b', withoutFunctions.catalogVersion);
   // 0.4.0 metric depth: the pure helpers behind distanceM and the distance label.
   {
     const vision = require(join(root, 'dist/cjs/engine/vision.js'));
@@ -156,6 +156,7 @@ check(
     check('formatDistance: one decimal under 10 m, whole metres above', vision.formatDistance(5.24) === '5.2 M' && vision.formatDistance(13.6) === '14 M', `${vision.formatDistance(5.24)} / ${vision.formatDistance(13.6)}`);
     const viz = cjsRoot.coreCatalog.getNodeType('output.visualization');
     check('output.visualization accepts the distance overlay', viz.config.safeParse({ overlays: ['boxes', 'labels', 'distance'] }).success);
+    check('model.depth takes distanceScale (default 1) and proximity_gate takes maxDistanceM', cjsRoot.coreCatalog.getNodeType('model.depth').config.parse({}).distanceScale === 1 && cjsRoot.coreCatalog.getNodeType('model.depth').config.safeParse({ distanceScale: 0.4 }).success && cjsRoot.coreCatalog.getNodeType('logic.proximity_gate').config.parse({ maxDistanceM: 8 }).maxDistanceM === 8 && cjsRoot.coreCatalog.getNodeType('logic.proximity_gate').config.parse({}).maxDistanceM === undefined);
     check('model manifests accept postprocess.kind depth-anything-metric', cjsRoot.modelManifestSchema.shape.postprocess.shape.kind.safeParse('depth-anything-metric').success);
   }
   check('NODE_GROUPS names `function` (not `custom`) as the seventh group', cjsRoot.NODE_GROUPS.length === 7 && cjsRoot.NODE_GROUPS[6] === 'function' && !cjsRoot.NODE_GROUPS.includes('custom'), cjsRoot.NODE_GROUPS.join(','));

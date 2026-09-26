@@ -7,9 +7,11 @@ version number follows the policy in [docs/compatibility.md](./docs/compatibilit
 ## Unreleased (0.4.0)
 
 Metric depth and a distance label. A minor under the policy in
-`docs/compatibility.md`: one additive config value and additive payload
-fields. The core catalog moves from `08c8c39436928e5e` to `6c5db917af76c5b9`
-(28 nodes; `output.visualization`'s `overlays` enum gained `distance`).
+`docs/compatibility.md`: additive config fields and values, additive payload
+fields. The core catalog moves from `08c8c39436928e5e` to `2b2a3c052696cf1e`
+(28 nodes): `output.visualization`'s `overlays` gained `distance`,
+`model.depth` gained `distanceScale`, `logic.proximity_gate` gained
+`maxDistanceM`.
 
 ### Added
 
@@ -23,6 +25,13 @@ fields. The core catalog moves from `08c8c39436928e5e` to `6c5db917af76c5b9`
   (one decimal under 10 m, whole metres above). It draws the boxes of the
   connected Depth input (Depth's own detections, enriched with `distanceM`),
   and logs once when the depth model is relative and has no distance to show.
+- `model.depth` config `distanceScale` (default 1): multiplies `distanceM`
+  and the `metres` range, a per-camera calibration.
+- `logic.proximity_gate` config `maxDistanceM` (optional): with a metric
+  depth model, a box matches when it is within that many metres, and
+  `minProximity` is ignored; on a relative model the node fails with a message
+  naming the fix. Condition meta carries `maxDistanceM` and each box's
+  `distanceM`.
 - `tools/export/export_depth.py --variant metric-outdoor` exports
   `depth/depth-anything-v2-metric-outdoor-small`
   (`depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf`); `xwe models
@@ -30,10 +39,12 @@ fields. The core catalog moves from `08c8c39436928e5e` to `6c5db917af76c5b9`
 
 ### Notes
 
-- Metric outdoor depth is trained on driving footage from a roughly 80° camera.
-  Wide-angle dashcams read farther than reality (about 2x on the 00008 sample);
-  treat the metres as a scale-dependent estimate until a per-camera
-  calibration exists.
+- Metric outdoor depth assumes a narrow camera. On the 00008 dashcam sample
+  the reported metres are self-consistent (distance x box width over a
+  1.88 m-wide vehicle gives a focal length within about 10% across 38 frames)
+  but imply a 53° horizontal field of view, so a wide-angle dashcam reads 2 to
+  4x too far. `distanceScale ≈ tan(26.5°) / tan(HFOV / 2)` corrects it (0.42
+  at 100°, 0.29 at 120°); a measured distance to a known object is better.
 
 ## 0.3.0 (2026-09-08)
 
