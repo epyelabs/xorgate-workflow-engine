@@ -4,6 +4,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
+## Unreleased (0.4.0)
+
+Metric depth and a distance label. A minor under the policy in
+`docs/compatibility.md`: one additive config value and additive payload
+fields. The core catalog moves from `08c8c39436928e5e` to `6c5db917af76c5b9`
+(28 nodes; `output.visualization`'s `overlays` enum gained `distance`).
+
+### Added
+
+- Model manifests accept `postprocess.kind: "depth-anything-metric"`: a depth
+  model whose output is depth in metres. `model.depth` inverts it before the
+  usual normalization, so `proximity`, the colormap and `logic.proximity_gate`
+  behave as on the relative model, and each box in `json:depth` gains
+  `distanceM` (median metres over the box's central half) and each record a
+  frame `metres: { min, median, max }` range. Relative models are unchanged.
+- `output.visualization` overlay `distance`: labels read `TRUCK - 5.2 M`
+  (one decimal under 10 m, whole metres above). It draws the boxes of the
+  connected Depth input (Depth's own detections, enriched with `distanceM`),
+  and logs once when the depth model is relative and has no distance to show.
+- `tools/export/export_depth.py --variant metric-outdoor` exports
+  `depth/depth-anything-v2-metric-outdoor-small`
+  (`depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf`); `xwe models
+  check` validates the new kind.
+
+### Notes
+
+- Metric outdoor depth is trained on driving footage from a roughly 80° camera.
+  Wide-angle dashcams read farther than reality (about 2x on the 00008 sample);
+  treat the metres as a scale-dependent estimate until a per-camera
+  calibration exists.
+
 ## 0.3.0 (2026-09-08)
 
 Exports for a platform shell. No node definition, executor or contract

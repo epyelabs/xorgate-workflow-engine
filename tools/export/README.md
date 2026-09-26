@@ -97,14 +97,16 @@ python export_yolo.py --name yolov8n --version 1 --out ./out
 # instance segmentation (family segmentation, postprocess yolov8-seg)
 python export_yolo.py --name yolov8n-seg --version 1 --out ./out
 
-# Depth Anything V2 Small (family depth)
+# Depth Anything V2 Small (family depth): relative, and the metric outdoor variant (metres)
 python export_depth.py --version 1 --out ./out
+python export_depth.py --variant metric-outdoor --version 1 --out ./out
 ```
 
 Registry names for the catalog defaults: `yolov8n` (default), `yolov8s`,
 `rtdetr` for family `detection`; `yolov8n-seg` for family `segmentation`;
-`depth-anything-v2-small` for family `depth`. The engine implements the
-`yolov8`, `yolov8-seg` and `depth-anything` decoders; an `rtdetr` manifest is
+`depth-anything-v2-small` (relative) and `depth-anything-v2-metric-outdoor-small`
+(metres) for family `depth`. The engine implements the `yolov8`, `yolov8-seg`,
+`depth-anything` and `depth-anything-metric` decoders; an `rtdetr` manifest is
 accepted by the schema and refused by the node until its decoder lands.
 
 ## Publishing

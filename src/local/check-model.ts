@@ -115,16 +115,16 @@ function checkOutputShape(
       text: `"${head.name}" ${dimsText(head.tensor.dims)} + "${proto.name}" ${dimsText(proto.tensor.dims)} match yolov8-seg with ${classes} classes (4 + ${classes} + ${YOLO_SEG_MASK_COEFFS})`,
     };
   }
-  if (kind === 'depth-anything') {
+  if (kind === 'depth-anything' || kind === 'depth-anything-metric') {
     const map = outputs[0];
     const dims = map.tensor.dims;
     const leading = dims.slice(0, -2);
     const mh = dims[dims.length - 2];
     const mw = dims[dims.length - 1];
     if (dims.length < 3 || leading.some((d) => d !== 1) || !(mh > 0 && mw > 0)) {
-      return { ok: false, text: `"${map.name}" ${dimsText(dims)} does not match depth-anything: expected one map [1,H,W]` };
+      return { ok: false, text: `"${map.name}" ${dimsText(dims)} does not match ${kind}: expected one map [1,H,W]` };
     }
-    return { ok: true, text: `"${map.name}" ${dimsText(dims)} matches depth-anything (one ${mw}x${mh} map)` };
+    return { ok: true, text: `"${map.name}" ${dimsText(dims)} matches ${kind} (one ${mw}x${mh} map)` };
   }
   return { ok: false, text: `postprocess.kind "${kind}" has no decoder in this engine (${shapes})` };
 }

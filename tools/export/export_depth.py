@@ -1,6 +1,12 @@
-"""Export Depth Anything V2 Small to the model registry layout.
+"""Export Depth Anything V2 Small (relative or metric outdoor) to the model registry layout.
 
-Produces, under --out/depth/depth-anything-v2-small/<version>/:
+--variant relative (default) exports depth-anything-v2-small; --variant
+metric-outdoor exports depth-anything-v2-metric-outdoor-small (checkpoint
+depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf, same architecture,
+fine-tuned on outdoor driving scenes, output in METRES, postprocess kind
+depth-anything-metric).
+
+Produces, under --out/depth/<name>/<version>/:
   model.onnx                torch.onnx export of the HF checkpoint
                             (depth-anything/Depth-Anything-V2-Small-hf),
                             static 518x518, opset 17
@@ -12,8 +18,10 @@ Produces, under --out/depth/depth-anything-v2-small/<version>/:
 
 Preprocessing is data in the manifest: plain resize to 518x518 (letterbox
 disabled; the map is stretched over the frame, which is what the TS engine's
-box mapping assumes), scale 1/255, ImageNet mean/std. Output is RELATIVE
-inverse depth (higher = closer), per-frame normalized by the engine.
+box mapping assumes), scale 1/255, ImageNet mean/std. The relative output is
+inverse depth (higher = closer), per-frame normalized by the engine; the
+metric output is depth in metres, which the engine inverts before the same
+normalization and also reads directly for each box's distanceM.
 
 Then: `xwe models check <out>/depth/depth-anything-v2-small/<version>` and
 publish with `node scripts/registry-sync.mjs <out> <target>` (see README.md).
@@ -29,8 +37,20 @@ from pathlib import Path
 
 import numpy as np
 
-HF_MODEL_ID = "depth-anything/Depth-Anything-V2-Small-hf"
-REGISTRY_NAME = "depth-anything-v2-small"
+VARIANTS = {
+    "relative": {
+        "hf": "depth-anything/Depth-Anything-V2-Small-hf",
+        "name": "depth-anything-v2-small",
+        "label": "Depth Anything V2 Small",
+        "kind": "depth-anything",
+    },
+    "metric-outdoor": {
+        "hf": "depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf",
+        "name": "depth-anything-v2-metric-outdoor-small",
+        "label": "Depth Anything V2 Metric Outdoor Small",
+        "kind": "depth-anything-metric",
+    },
+}
 INPUT_SIZE = 518  # 37 * 14: DINOv2 patch size
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
@@ -50,14 +70,14 @@ def files_block(dest: Path) -> dict:
     return {"model.onnx": {"sha256": sha256_of(model), "sizeBytes": model.stat().st_size}}
 
 
-def build_manifest(version: int) -> dict:
+def build_manifest(version: int, variant: dict = VARIANTS["relative"]) -> dict:
     """Mirror of modelManifestSchema in src/models/registry.ts (files added after export)."""
     return {
         "manifestVersion": 1,
         "family": "depth",
-        "name": REGISTRY_NAME,
+        "name": variant["name"],
         "version": version,
-        "label": "Depth Anything V2 Small",
+        "label": variant["label"],
         "backend": "cpu-onnx",
         "input": {
             "width": INPUT_SIZE,
@@ -68,7 +88,7 @@ def build_manifest(version: int) -> dict:
             "letterbox": {"enabled": False, "padValue": 114},
         },
         "classNames": [],
-        "postprocess": {"kind": "depth-anything"},
+        "postprocess": {"kind": variant["kind"]},
         "quantization": "fp32",
     }
 
@@ -101,20 +121,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", type=int, default=1)
     parser.add_argument("--out", type=Path, default=Path("out"))
+    parser.add_argument("--variant", choices=sorted(VARIANTS), default="relative")
     args = parser.parse_args()
+    variant = VARIANTS[args.variant]
 
     import torch  # heavy imports, keep local
     from transformers import AutoModelForDepthEstimation
 
-    dest = args.out / "depth" / REGISTRY_NAME / str(args.version)
+    dest = args.out / "depth" / variant["name"] / str(args.version)
     fixtures = dest / "fixtures"
     fixtures.mkdir(parents=True, exist_ok=True)
 
-    model = AutoModelForDepthEstimation.from_pretrained(HF_MODEL_ID)
+    model = AutoModelForDepthEstimation.from_pretrained(variant["hf"])
     model.eval()
 
     class DepthWrapper(torch.nn.Module):
-        """(1, 3, H, W) pixel_values -> (1, H, W) relative inverse depth."""
+        """(1, 3, H, W) pixel_values -> (1, H, W) depth map (relative inverse, or metres)."""
 
         def __init__(self, inner: torch.nn.Module) -> None:
             super().__init__()
@@ -134,7 +156,7 @@ def main() -> None:
         dynamo=False,
     )
 
-    manifest = build_manifest(args.version)
+    manifest = build_manifest(args.version, variant)
     manifest["files"] = files_block(dest)
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -150,8 +172,11 @@ def main() -> None:
 
     # 16x16 grid of per-frame normalized values: what the TS engine's
     # normalizeDepthMap + downsample sees, tolerant of tiny numeric drift.
+    # Metric maps are inverted first, as the engine does (invertMetres: 1 / max(d, 0.1)).
     dmin, dmax = float(depth.min()), float(depth.max())
-    norm = (depth - dmin) / (dmax - dmin) if dmax > dmin else np.zeros_like(depth)
+    rel = 1.0 / np.maximum(depth, 0.1) if variant["kind"] == "depth-anything-metric" else depth
+    rmin, rmax = float(rel.min()), float(rel.max())
+    norm = (rel - rmin) / (rmax - rmin) if rmax > rmin else np.zeros_like(rel)
     ys = (np.arange(16) * depth.shape[0]) // 16
     xs = (np.arange(16) * depth.shape[1]) // 16
     grid = norm[np.ix_(ys, xs)]
@@ -165,7 +190,7 @@ def main() -> None:
         "normalizedGrid16": [[round(float(v), 4) for v in row] for row in grid],
     }
     (fixtures / "expected_0.json").write_text(json.dumps(expected, indent=2) + "\n")
-    print(f"exported depth/{REGISTRY_NAME} v{args.version} -> {dest} (sha256 {manifest['files']['model.onnx']['sha256'][:12]}...)")
+    print(f"exported depth/{variant['name']} v{args.version} -> {dest} (sha256 {manifest['files']['model.onnx']['sha256'][:12]}...)")
     print(f"next: xwe models check {dest}")
 
 

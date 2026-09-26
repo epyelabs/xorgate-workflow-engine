@@ -137,11 +137,27 @@ check(
   check('root exports createCatalog, corePacks, coreCatalog, CORE_NAMESPACES and the executor helpers', typeof cjsRoot.createCatalog === 'function' && Array.isArray(cjsRoot.corePacks) && typeof cjsRoot.coreCatalog?.getNodeType === 'function' && Array.isArray(cjsRoot.CORE_NAMESPACES) && ['requireInput', 'inputsForPort', 'telemetrySamples', 'mergeByTs', 'resolveSignal'].every((n) => typeof cjsRoot[n] === 'function'));
   check('corePacks are eight packs totalling 28 nodes, core/function last with the two function nodes', cjsRoot.corePacks.length === 8 && cjsRoot.corePacks.reduce((n, p) => n + p.nodes.length, 0) === 28 && cjsRoot.corePacks[7].name === 'core/function' && cjsRoot.corePacks[7].nodes.map((n) => n.def.type).join(',') === 'function.javascript,function.python', cjsRoot.corePacks.map((p) => `${p.name}:${p.nodes.length}`).join(' '));
   check('payload.packs is one core entry whose hash is catalogVersion (no packs registered)', Array.isArray(payload.packs) && payload.packs.length === 1 && payload.packs[0].name === 'core' && payload.packs[0].hash === payload.catalogVersion && payload.packs[0].version === JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version, JSON.stringify(payload.packs));
-  // 0.2.0 moved the core hash on purpose (two new core nodes, docs/compatibility.md: a minor).
-  // The 26 pre-0.2.0 defs are byte-identical: alone they still hash to 0.1.0's catalogVersion.
-  check('catalogVersion is the 0.2.0 core hash 08c8c39436928e5e', payload.catalogVersion === '08c8c39436928e5e', payload.catalogVersion);
+  // The core hash moves on purpose on minors (docs/compatibility.md): 0.2.0 added the two
+  // function nodes (08c8c39436928e5e); 0.4.0 added the `distance` overlay to
+  // output.visualization's config enum (6c5db917af76c5b9). Without core/function the 26
+  // older defs hash to b554df4c23d4e892 (0.1.0-0.3.0: e481243f5ffe4678).
+  check('catalogVersion is the 0.4.0 core hash 6c5db917af76c5b9', payload.catalogVersion === '6c5db917af76c5b9', payload.catalogVersion);
   const withoutFunctions = cjsRoot.buildCatalogPayload(cjsRoot.createCatalog(cjsRoot.corePacks.filter((p) => p.name !== 'core/function')));
-  check('the 26 pre-0.2.0 defs are unchanged: without core/function the payload hashes to 0.1.0\'s e481243f5ffe4678', withoutFunctions.nodes.length === 26 && withoutFunctions.catalogVersion === 'e481243f5ffe4678', withoutFunctions.catalogVersion);
+  check('without core/function the 26 non-function defs hash to 0.4.0\'s b554df4c23d4e892', withoutFunctions.nodes.length === 26 && withoutFunctions.catalogVersion === 'b554df4c23d4e892', withoutFunctions.catalogVersion);
+  // 0.4.0 metric depth: the pure helpers behind distanceM and the distance label.
+  {
+    const vision = require(join(root, 'dist/cjs/engine/vision.js'));
+    const inv = vision.invertMetres(new Float32Array([2, 4, 0]));
+    check('invertMetres: 1/d with a 0.1 m floor (higher = closer, like the relative model)', inv[0] === 0.5 && inv[1] === 0.25 && Math.abs(inv[2] - 10) < 1e-5, Array.from(inv).join(','));
+    // 10x10 map at 100x100 source px: background 40 m, an object at 6 m in x 20..80, y 30..90.
+    const raw = new Float32Array(100).fill(40);
+    for (let y = 3; y < 9; y++) for (let x = 2; x < 8; x++) raw[y * 10 + x] = 6;
+    check('medianMetresInBox reads the box\'s central half (object 6 m, background 40 m)', vision.medianMetresInBox(raw, 10, 10, [0, 10, 100, 100], 100, 100) === 6, String(vision.medianMetresInBox(raw, 10, 10, [0, 10, 100, 100], 100, 100)));
+    check('formatDistance: one decimal under 10 m, whole metres above', vision.formatDistance(5.24) === '5.2 M' && vision.formatDistance(13.6) === '14 M', `${vision.formatDistance(5.24)} / ${vision.formatDistance(13.6)}`);
+    const viz = cjsRoot.coreCatalog.getNodeType('output.visualization');
+    check('output.visualization accepts the distance overlay', viz.config.safeParse({ overlays: ['boxes', 'labels', 'distance'] }).success);
+    check('model manifests accept postprocess.kind depth-anything-metric', cjsRoot.modelManifestSchema.shape.postprocess.shape.kind.safeParse('depth-anything-metric').success);
+  }
   check('NODE_GROUPS names `function` (not `custom`) as the seventh group', cjsRoot.NODE_GROUPS.length === 7 && cjsRoot.NODE_GROUPS[6] === 'function' && !cjsRoot.NODE_GROUPS.includes('custom'), cjsRoot.NODE_GROUPS.join(','));
   check('CORE_NAMESPACES are the seven core namespaces plus function', cjsRoot.CORE_NAMESPACES.join(',') === 'source,video,telemetry,model,logic,output,connector,function', cjsRoot.CORE_NAMESPACES.join(','));
   const sample = cjsRoot.getNodeType('telemetry.ema');

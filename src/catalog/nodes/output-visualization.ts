@@ -30,7 +30,7 @@ import { defineNode } from '../types';
 
 const configSchema = z.object({
   overlays: z
-    .array(z.enum(['boxes', 'labels', 'confidence', 'depth_map', 'masks']))
+    .array(z.enum(['boxes', 'labels', 'confidence', 'depth_map', 'masks', 'distance']))
     .default(['boxes', 'labels'])
     .describe('Overlay layers to render (options depend on connected inputs)'),
 });
@@ -117,9 +117,14 @@ export const executor = async function* outputVisualization(
     ctx.log('masks overlay needs a connected Segments input; skipping that layer');
     overlays.delete('masks');
   }
+  if (overlays.has('distance') && !depthInput) {
+    ctx.log('distance overlay needs a connected Depth input; skipping that layer');
+    overlays.delete('distance');
+  }
   const boxOverlays = new Set<OverlayKind>(
-    [...overlays].filter((o) => o === 'boxes' || o === 'labels' || o === 'confidence'),
+    [...overlays].filter((o) => o === 'boxes' || o === 'labels' || o === 'confidence' || o === 'distance'),
   );
+  let warnedRelative = false;
 
   const boxesByTs = new Map<number, DetectionBox[]>();
   const depthByTs = new Map<number, DepthPayload>();
@@ -152,9 +157,17 @@ export const executor = async function* outputVisualization(
     if (segments && overlays.has('masks')) {
       drawSegments(canvas, frame.width, frame.height, toSegInstances(segments), overlays.has('labels'));
     }
-    const boxes = boxesByTs.get(msg.ts) ?? [];
+    const detBoxes = boxesByTs.get(msg.ts) ?? [];
     boxesByTs.delete(msg.ts);
-    if (detectionsInput && boxOverlays.size > 0) {
+    // With the distance overlay, draw the Depth node's boxes: they are the
+    // same detections (Depth's own detections input) enriched with distanceM.
+    const useDepthBoxes = overlays.has('distance') && depth?.boxes !== undefined;
+    if (useDepthBoxes && !warnedRelative && depth.boxes!.length > 0 && depth.boxes![0].distanceM === undefined) {
+      ctx.log('distance overlay needs a metric depth model (e.g. depth-anything-v2-metric-outdoor-small); labels show no distance');
+      warnedRelative = true;
+    }
+    const boxes = useDepthBoxes ? depth.boxes! : detBoxes;
+    if ((detectionsInput || useDepthBoxes) && boxOverlays.size > 0) {
       drawDetections(canvas, frame.width, frame.height, boxes, boxOverlays);
     }
 

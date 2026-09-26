@@ -268,6 +268,11 @@ export interface DepthMapEmbed {
 export interface DepthBox extends DetectionBox {
   /** Median normalized inverse depth inside the box (0..1, higher = closer). */
   proximity: number;
+  /**
+   * Metric models only (postprocess depth-anything-metric): median distance in
+   * metres over the box's central region. Absent on relative models.
+   */
+  distanceM?: number;
 }
 export interface DepthPayload {
   ts: number;
@@ -277,6 +282,8 @@ export interface DepthPayload {
   stats: { min: number; max: number; mean: number; median: number };
   map: DepthMapEmbed;
   boxes?: DepthBox[];
+  /** Metric models only: the frame's distance range in metres. */
+  metres?: { min: number; median: number; max: number };
 }
 /**
  * json:segments payload (M4): one message per frame, empty `instances`

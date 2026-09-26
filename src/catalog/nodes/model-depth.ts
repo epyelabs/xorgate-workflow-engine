@@ -5,7 +5,10 @@ import { loadOrt } from '../../engine/ort';
 import {
   depthMapStats,
   downsampleDepthMap,
+  invertMetres,
   medianDepthInBox,
+  medianMetresInBox,
+  metresStats,
   normalizeDepthMap,
   renderDepthColormap,
   letterboxToTensor,
@@ -28,6 +31,12 @@ import { defineNode } from '../types';
 // derivation for fusion graphs (scenario 3). Backend-selectable per
 // architecture.md §6: CPU ONNX (relative depth) by default, GPU endpoint
 // (metric depth) when demanded. Ports do not change between backends.
+//
+// A metric model (postprocess kind depth-anything-metric, e.g.
+// depth-anything-v2-metric-outdoor-small) outputs metres. The map is inverted
+// before normalization so proximity, the colormap and the proximity gate keep
+// their "higher = closer" meaning, and each box ADDITIVELY gains `distanceM`
+// (median metres over the box's central region) plus a frame `metres` range.
 //
 // When the target has an artifact sink (media engine), each frame's colormap
 // render is written to frames/<nodeId>/<seq>.jpg; on simulation runs the
@@ -93,9 +102,11 @@ export const executor = async function* modelDepth(
   if (manifest.backend !== 'cpu-onnx') {
     throw new Error(`Model backend "${manifest.backend}" is not supported yet (cpu-onnx only)`);
   }
-  if (manifest.postprocess.kind !== 'depth-anything') {
-    throw new Error(`Post-processing "${manifest.postprocess.kind}" is not a depth decoder`);
+  const kind = manifest.postprocess.kind;
+  if (kind !== 'depth-anything' && kind !== 'depth-anything-metric') {
+    throw new Error(`Post-processing "${kind}" is not a depth decoder`);
   }
+  const metric = kind === 'depth-anything-metric';
 
   const ort = loadOrt();
   const session = await ort.InferenceSession.create(modelPath);
@@ -134,7 +145,8 @@ export const executor = async function* modelDepth(
     if (!Number.isInteger(mh) || !Number.isInteger(mw) || mh * mw !== output.data.length) {
       throw new Error(`unexpected depth output shape [${dims.join(', ')}]`);
     }
-    const map = normalizeDepthMap(output.data, mw, mh);
+    const raw = output.data as Float32Array;
+    const map = normalizeDepthMap(metric ? invertMetres(raw) : raw, mw, mh);
     const stats = depthMapStats(map);
     const embed = downsampleDepthMap(map, EMBED_MAP_MAX_WIDTH);
 
@@ -145,6 +157,7 @@ export const executor = async function* modelDepth(
       boxes = detBoxes.map((b) => ({
         ...b,
         proximity: medianDepthInBox(map, b.xyxy, frame.width, frame.height),
+        ...(metric ? { distanceM: medianMetresInBox(raw, mw, mh, b.xyxy, frame.width, frame.height) } : {}),
       }));
     }
 
@@ -169,11 +182,12 @@ export const executor = async function* modelDepth(
         data: Buffer.from(embed.values).toString('base64'),
       },
       ...(boxes !== undefined ? { boxes } : {}),
+      ...(metric ? { metres: metresStats(raw) } : {}),
     };
     yield { ch: 'json' as const, tag: 'depth', ts: msg.ts, payload };
   }
   const avg = frames > 0 ? Math.round(inferMs / frames) : 0;
   ctx.setSummary(
-    `depth over ${frames} frame(s) (${manifest.name} v${manifest.version}, ~${avg} ms/frame)`,
+    `depth over ${frames} frame(s) (${manifest.name} v${manifest.version}${metric ? ', metric' : ''}, ~${avg} ms/frame)`,
   );
 };

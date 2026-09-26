@@ -318,7 +318,7 @@ export function drawText(
   }
 }
 
-export type OverlayKind = 'boxes' | 'labels' | 'confidence' | 'depth_map' | 'masks';
+export type OverlayKind = 'boxes' | 'labels' | 'confidence' | 'depth_map' | 'masks' | 'distance';
 
 // --- Depth (M4) -------------------------------------------------------------------
 // The depth model emits one relative inverse-depth map per frame. Raw floats
@@ -430,6 +430,65 @@ export function medianDepthInBox(
     if (acc >= count / 2) return Number((v / 255).toFixed(4));
   }
   return 1;
+}
+
+/**
+ * Metric models (depth-anything-metric) output DEPTH IN METRES, higher =
+ * farther. Inverting gives the same "higher = closer" orientation the relative
+ * model has, so normalization, proximity, the colormap and the proximity gate
+ * behave identically on both kinds. Clamped at 0.1 m to keep 1/d finite.
+ */
+export function invertMetres(raw: Float32Array): Float32Array {
+  const out = new Float32Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = 1 / Math.max(raw[i], 0.1);
+  return out;
+}
+
+/**
+ * Median distance in metres over the CENTRAL half of a box (middle 50% of its
+ * width and height) on the raw metric map. The central region keeps the
+ * background around the object (sky, road beside it) out of the estimate,
+ * which a whole-box median would let in on thin or partly occluded objects.
+ */
+export function medianMetresInBox(
+  raw: Float32Array,
+  mapWidth: number,
+  mapHeight: number,
+  xyxy: [number, number, number, number],
+  sourceWidth: number,
+  sourceHeight: number,
+): number {
+  const [bx1, by1, bx2, by2] = xyxy;
+  const cx1 = bx1 + (bx2 - bx1) * 0.25;
+  const cx2 = bx2 - (bx2 - bx1) * 0.25;
+  const cy1 = by1 + (by2 - by1) * 0.25;
+  const cy2 = by2 - (by2 - by1) * 0.25;
+  const x1 = Math.max(0, Math.floor((cx1 / sourceWidth) * mapWidth));
+  const y1 = Math.max(0, Math.floor((cy1 / sourceHeight) * mapHeight));
+  const x2 = Math.min(mapWidth, Math.max(x1 + 1, Math.ceil((cx2 / sourceWidth) * mapWidth)));
+  const y2 = Math.min(mapHeight, Math.max(y1 + 1, Math.ceil((cy2 / sourceHeight) * mapHeight)));
+  const values: number[] = [];
+  for (let y = y1; y < y2; y++) {
+    for (let x = x1; x < x2; x++) values.push(raw[y * mapWidth + x]);
+  }
+  if (values.length === 0) return 0;
+  values.sort((a, b) => a - b);
+  return Number(values[Math.floor(values.length / 2)].toFixed(2));
+}
+
+/** Frame distance range in metres (raw metric map). */
+export function metresStats(raw: Float32Array): { min: number; median: number; max: number } {
+  const sorted = Float32Array.from(raw).sort();
+  return {
+    min: Number(sorted[0].toFixed(2)),
+    median: Number(sorted[Math.floor(sorted.length / 2)].toFixed(2)),
+    max: Number(sorted[sorted.length - 1].toFixed(2)),
+  };
+}
+
+/** Label text for a distance: one decimal under 10 m, whole metres above. */
+export function formatDistance(metres: number): string {
+  return metres < 10 ? `${metres.toFixed(1)} M` : `${Math.round(metres)} M`;
 }
 
 // Turbo-like colormap anchors (dark blue -> cyan -> green -> yellow -> red),
@@ -681,7 +740,7 @@ export function drawDetections(
   img: Buffer,
   width: number,
   height: number,
-  boxes: DetectionBox[],
+  boxes: Array<DetectionBox & { distanceM?: number }>,
   overlays: ReadonlySet<OverlayKind>,
 ): void {
   const pixelScale = width >= 960 ? 2 : 1;
@@ -692,6 +751,11 @@ export function drawDetections(
     const parts: string[] = [];
     if (overlays.has('labels')) parts.push(box.cls);
     if (overlays.has('confidence')) parts.push(`${Math.round(box.confidence * 100)}%`);
+    // "TRUCK - 5.2 M": the distance follows the other parts after a dash.
+    if (overlays.has('distance') && box.distanceM !== undefined) {
+      if (parts.length > 0) parts.push('-');
+      parts.push(formatDistance(box.distanceM));
+    }
     if (parts.length > 0) {
       const text = parts.join(' ');
       const tw = text.length * 6 * pixelScale + 2;
