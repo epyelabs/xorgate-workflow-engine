@@ -5,7 +5,7 @@
 // `xwe doctor`, models, packs, the conformance kit, secret hygiene, log
 // levels and the code function nodes. Run `npm run build` first (`npm test` does).
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, existsSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
@@ -231,7 +231,7 @@ for (const [fmt, argv, imports] of [
       const prev = i === 0 ? 0 : lines.findIndex((l) => l.startsWith(`  ${all[i - 1].padEnd(18)}`));
       return idx > 0 && idx > prev;
     }), lines.slice(1).join(' | '));
-  check('doctor catalog line carries the 0.4.0 core hash', lines.some((l) => l === '  catalog           28 nodes, core 2b2a3c052696cf1e, no packs'));
+  check('doctor catalog line carries the 0.5.0 core hash', lines.some((l) => l === '  catalog           28 nodes, core f8861576c807e382, no packs'));
   check('doctor registry line names the registry URL and its reachability', lines.some((l) => /^ {2}registry {10}https:\/\/models\.xorgate\.io \((index: \d+ models?|unreachable: .+|index\.json: HTTP \d+)\)$/.test(l)), lines.find((l) => l.startsWith('  registry')));
   check('doctor models lines are the explicit root and the cache only (no ./fixtures/models by default)', !lines.some((l) => l.includes('./fixtures/models')) && lines.some((l) => l.startsWith('  models            ') && l.includes('empty-cache')), lines.filter((l) => /^ {2}(models| {6})/.test(l)).join(' | '));
 }
@@ -487,13 +487,13 @@ function serveDir(dir) {
     let out = null;
     try { out = JSON.parse(lib.stdout.trim().split('\n').at(-1)); } catch { /* reported below */ }
     check(`packs (${fmt}) library script runs`, lib.status === 0 && out !== null, lib.stderr.trim().split('\n').slice(-3).join(' | '));
-    // 0.4.0: the core hash moved on purpose (distance overlay, distanceScale, maxDistanceM).
-    check(`packs (${fmt}): the core payload is 0.4.0's: 2b2a3c052696cf1e, 28 nodes, one core pack entry with that hash`,
-      out?.coreVersion === '2b2a3c052696cf1e' && out?.coreNodes === 28 && JSON.stringify(out?.corePacks) === JSON.stringify([{ name: 'core', version: pkgVersion, hash: '2b2a3c052696cf1e' }]), JSON.stringify(out?.corePacks));
+    // 0.5.0: the core hash moved on purpose (output.event's webhook field).
+    check(`packs (${fmt}): the core payload is 0.5.0's: f8861576c807e382, 28 nodes, one core pack entry with that hash`,
+      out?.coreVersion === 'f8861576c807e382' && out?.coreNodes === 28 && JSON.stringify(out?.corePacks) === JSON.stringify([{ name: 'core', version: pkgVersion, hash: 'f8861576c807e382' }]), JSON.stringify(out?.corePacks));
     check(`packs (${fmt}): corePacks are the eight core namespaces in registry order, core/function last`,
       JSON.stringify(out?.corePackNames) === JSON.stringify(['core/source', 'core/connector', 'core/video', 'core/telemetry', 'core/model', 'core/logic', 'core/output', 'core/function']), String(out?.corePackNames));
     check(`packs (${fmt}): with the pack, packs[] has two entries, the core hash is unchanged and catalogVersion differs`,
-      out?.packs?.length === 2 && out.packs[0].name === 'core' && out.packs[0].hash === '2b2a3c052696cf1e' && out.packs[1].name === '@acme/xwe-nodes-scale' && out.packs[1].version === '1.0.0' && /^[0-9a-f]{16}$/.test(out.packs[1].hash) && out.version !== '2b2a3c052696cf1e' && out.nodes === 29 && out.cached === true,
+      out?.packs?.length === 2 && out.packs[0].name === 'core' && out.packs[0].hash === 'f8861576c807e382' && out.packs[1].name === '@acme/xwe-nodes-scale' && out.packs[1].version === '1.0.0' && /^[0-9a-f]{16}$/.test(out.packs[1].hash) && out.version !== 'f8861576c807e382' && out.nodes === 29 && out.cached === true,
       `${JSON.stringify(out?.packs)} catalogVersion=${out?.version}`);
     check(`packs (${fmt}): validateDefinition reports the unknown type against core and passes against the pack catalog; inspectTemplate takes the catalog`,
       out?.validateCore?.includes('UNKNOWN_NODE_TYPE') && out?.validatePack === true && out?.inspectKey === 'telemetry', JSON.stringify([out?.validateCore, out?.validatePack, out?.inspectKey]));
@@ -503,7 +503,7 @@ function serveDir(dir) {
     check(`packs (${fmt}): catalog and packs together is a usage error; a core namespace, a duplicate type and an untagged json output throw naming the node`,
       out?.errors?.both === 'createEngine takes a catalog or packs, not both' && out?.errors?.namespace?.includes('node type "model.scale" uses the core namespace "model"') && out?.errors?.duplicate?.includes('Duplicate catalog node type "acme.scale" (in pack "@acme/xwe-nodes-scale" and pack "y")') && out?.errors?.tag === 'json output "o" on "acme.untagged" must declare a tag', JSON.stringify(out?.errors));
     check(`packs (${fmt}): core minus core/model composes 24 nodes with a different core hash and no detection node`,
-      out?.minusModel?.nodes === 24 && out.minusModel.hasDetection === false && out.minusModel.packs?.length === 1 && out.minusModel.packs[0].name === 'core' && out.minusModel.packs[0].hash !== '2b2a3c052696cf1e', JSON.stringify(out?.minusModel));
+      out?.minusModel?.nodes === 24 && out.minusModel.hasDetection === false && out.minusModel.packs?.length === 1 && out.minusModel.packs[0].name === 'core' && out.minusModel.packs[0].hash !== 'f8861576c807e382', JSON.stringify(out?.minusModel));
   }
 }
 
@@ -941,6 +941,82 @@ async function handler(event, context) {
   check('doctor reports python3 with its path and version', res.stdout.split('\n').some((l) => /^  python3 {11}\S+python3 \(3\.\d+\.\d+\)$/.test(l)), res.stdout.split('\n').find((l) => l.startsWith('  python3')));
   res = xwe(['doctor'], { PATH: join(fnRoot, 'empty-bin') });
   check('doctor without python3 on PATH says so and does not fail the check', res.stdout.includes('  python3           not found on PATH; function.python nodes will fail (install python3)'), res.stdout.split('\n').find((l) => l.startsWith('  python3')));
+}
+
+// --- webhooks (0.5.0): output.event's `webhook` name, bound locally ----------
+// A loopback listener (127.0.0.1, never a public receiver) stands in for the
+// endpoint. The CLI runs async here: spawnSync would block the listener.
+{
+  const whRoot = join(outRoot, 'webhooks');
+  mkdirSync(whRoot, { recursive: true });
+  const TPL = 'fixtures/templates/overspeed-webhook.json';
+  const SECRET = 'whsec_' + Buffer.from('golden-webhook-key-0123456789abcdef').toString('base64');
+  const received = [];
+  let status = 204;
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => { received.push({ headers: req.headers, body }); res.writeHead(status).end(); });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${server.address().port}/hook`;
+  const xweAsync = (args, env = {}) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(root, 'dist/cjs/cli/index.js'), ...args], { cwd: root, env: { ...process.env, XWE_MODELS_DIR: join(outRoot, 'empty-cache'), ...env } });
+    let stdout = ''; let stderr = '';
+    child.stdout.on('data', (c) => (stdout += c));
+    child.stderr.on('data', (c) => (stderr += c));
+    child.on('close', (code) => resolve({ status: code, stdout, stderr }));
+  });
+  const verify = (h, body, secret) => {
+    const key = Buffer.from(secret.slice('whsec_'.length), 'base64');
+    const expected = createHmac('sha256', key).update(`${h['webhook-id']}.${h['webhook-timestamp']}.${body}`).digest('base64');
+    return (h['webhook-signature'] ?? '').split(' ').includes(`v1,${expected}`);
+  };
+  const baseRun = ['run', TPL, '--input', 'telemetry=fixtures/telemetry/window.csv', '--out', whRoot];
+
+  let r = xwe(['validate', TPL]);
+  check('webhooks: validate lists both names unbound, exit 0', r.status === 0 && /^ {2}dispatch {3}unbound .*node n4$/m.test(r.stdout) && /^ {2}audit {6}unbound .*node n5$/m.test(r.stdout), r.stdout.trim().split('\n').slice(-3).join(' | '));
+  r = xwe(['validate', TPL, '--webhook', 'dispatch=https://hooks.example.test/x'], { XWE_WEBHOOK_AUDIT: 'https://audit.example.test/y' });
+  check('webhooks: validate shows a flag binding and an env binding with their origins', r.status === 0 && r.stdout.includes('dispatch   bound -> https://hooks.example.test (unsigned, flag/file)') && r.stdout.includes('audit      bound -> https://audit.example.test (unsigned, XWE_WEBHOOK_AUDIT)'), r.stdout.trim().split('\n').slice(-2).join(' | '));
+  r = xwe(['validate', 'fixtures/templates/overspeed.json']);
+  check('webhooks: a template without webhook names says "webhooks: none"', r.status === 0 && r.stdout.includes('webhooks: none'));
+
+  r = await xweAsync([...baseRun, '--run-id', 'golden-webhook', '--webhook', `dispatch=${url}`, '--webhook-secret', `dispatch=${SECRET}`, '--allow-insecure-webhooks', '--progress', 'json', '--log-level', 'debug']);
+  const posted = received.map((x) => ({ ...x, json: JSON.parse(x.body) }));
+  check('webhooks: the run succeeds and POSTs exactly one event (n4 is bound, n5 is not)', r.status === 0 && posted.length === 1, `${posted.length} POST(s); ${r.stderr.trim().split('\n').at(-1)}`);
+  const p0 = posted[0];
+  check('webhooks: the POST carries Standard Webhooks headers whose v1 signature verifies with the secret', p0 && verify(p0.headers, p0.body, SECRET) && p0.headers['webhook-id'] === p0.json.id && /^\d{10}$/.test(p0.headers['webhook-timestamp']) && p0.headers['x-xorgate-event'] === 'workflow.event' && p0.headers['content-type'] === 'application/json', JSON.stringify(p0?.headers));
+  check('webhooks: the body is the platform envelope with data.nodeId n4 and run.trigger local', p0?.json.type === 'workflow.event' && p0.json.apiVersion === '2026-09-27' && /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p0.json.id) && p0.json.organizationId === null && p0.json.data.nodeId === 'n4' && p0.json.data.kind === 'overspeed' && p0.json.data.occurredAt === '2026-08-12T23:56:01.289Z' && p0.json.data.run.id === 'golden-webhook' && p0.json.data.run.trigger === 'local', p0?.body);
+  check('webhooks: the unbound name warns once on stderr', (r.stderr.match(/webhook "audit" \(node n5\) is not bound/g) ?? []).length === 1, r.stderr.trim().split('\n').slice(0, 3).join(' | '));
+  const runDir = join(whRoot, 'golden-webhook');
+  const evLines = readFileSync(join(runDir, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const res = readJson(join(runDir, 'result.json'));
+  check('webhooks: events.jsonl, result.json and NDJSON event messages carry nodeId', evLines.map((e) => e.nodeId).join(',') === 'n4,n5' && res.events.map((e) => e.nodeId).join(',') === 'n4,n5' && r.stdout.split('\n').filter((l) => l.includes('"t":"event"')).every((l) => /"nodeId":"n[45]"/.test(l)), evLines.map((e) => e.nodeId).join(','));
+  const { engineResultSchema } = createRequire(import.meta.url)(join(root, 'dist/cjs/index.js'));
+  const legacy = { ...res, events: res.events.map(({ nodeId: _n, ...e }) => e) };
+  check('webhooks: a 0.4.0-shaped result.json (events without nodeId) still parses', engineResultSchema.safeParse(legacy).success && engineResultSchema.safeParse(res).success);
+  const artifacts = readdirSync(runDir).map((f) => join(runDir, f)).filter((f) => statSync(f).isFile());
+  const b64 = SECRET.slice('whsec_'.length);
+  check('webhooks: the signing secret appears in no stdout, stderr or artifact', ![r.stdout, r.stderr, ...artifacts.map((f) => readFileSync(f, 'utf8'))].some((t) => t.includes(SECRET) || t.includes(b64)), `${artifacts.length} artifact(s) scanned`);
+
+  received.length = 0;
+  writeFileSync(join(whRoot, 'hooks.json'), JSON.stringify({ dispatch: { url: 'http://127.0.0.1:9/file-loses' , secret: SECRET }, audit: { url } }));
+  r = await xweAsync([...baseRun, '--run-id', 'golden-webhook-file', '--webhooks', join(whRoot, 'hooks.json'), '--webhook', `dispatch=${url}`, '--allow-insecure-webhooks'], { XWE_WEBHOOK_DISPATCH: 'http://127.0.0.1:9/env-loses' });
+  check('webhooks: --webhook beats --webhooks beats env; the file binds audit and signs dispatch', r.status === 0 && received.length === 2 && received.every((x) => x.headers['webhook-signature'] ? verify(x.headers, x.body, SECRET) : JSON.parse(x.body).data.nodeId === 'n5') && received.map((x) => JSON.parse(x.body).data.nodeId).sort().join(',') === 'n4,n5', `${received.length} POST(s); ${r.stderr.trim().split('\n').at(-1)}`);
+
+  received.length = 0;
+  status = 500;
+  r = await xweAsync([...baseRun, '--run-id', 'golden-webhook-500', '--allow-insecure-webhooks'], { XWE_WEBHOOK_DISPATCH: url, XWE_WEBHOOK_SECRET_DISPATCH: SECRET });
+  check('webhooks: env binds and signs; a 500 is logged, not retried, and the run still succeeds', r.status === 0 && received.length === 1 && verify(received[0].headers, received[0].body, SECRET) && r.stderr.includes('HTTP 500') && r.stderr.includes('does not retry'), r.stderr.trim().split('\n').find((l) => l.includes('dispatch')));
+  status = 204;
+
+  r = await xweAsync([...baseRun, '--run-id', 'golden-webhook-http', '--webhook', `dispatch=${url}`]);
+  check('webhooks: an http URL without --allow-insecure-webhooks exits 2 and runs nothing', r.status === 2 && r.stderr.includes('webhook "dispatch": the URL must be https:') && !existsSync(join(whRoot, 'golden-webhook-http')), r.stderr.trim());
+  r = await xweAsync([...baseRun, '--run-id', 'golden-webhook-userinfo', '--webhook', 'dispatch=https://u:p@hooks.example.test/']);
+  check('webhooks: a URL with user-info exits 2 without echoing it', r.status === 2 && r.stderr.includes('must not carry user-info') && !r.stderr.includes('u:p@'), r.stderr.trim());
+  r = await xweAsync([...baseRun, '--run-id', 'golden-webhook-badsecret', '--webhook', `dispatch=${url}`, '--allow-insecure-webhooks', '--webhook-secret', 'dispatch=not-a-whsec-LEAKME']);
+  check('webhooks: a secret that is not whsec_<base64> exits 2 naming the webhook, never the value', r.status === 2 && r.stderr.includes('webhook "dispatch": the secret must be a Standard Webhooks secret') && !r.stderr.includes('LEAKME'), r.stderr.trim());
+  server.close();
 }
 
 if (!failed) rmSync(outRoot, { recursive: true, force: true });

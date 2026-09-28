@@ -7,6 +7,7 @@ import { capabilityTokensForNode, coreCatalog } from '../catalog/index';
 import type { Catalog } from '../catalog/pack';
 import { runManifestSchema, runPrefix, type RunManifest } from '../engine/manifest';
 import type { EngineSourceBinding } from '../catalog/types';
+import { webhookRefsOf, type WebhookRef } from './webhooks';
 
 /**
  * The local equivalent of the cloud dispatcher: template + `--input name=path`
@@ -47,6 +48,8 @@ export interface TemplateInfo {
   sources: Array<{ nodeId: string; type: string; label: string; inputKey: string }>;
   /** Capability tokens across the graph (secret:*, media, ...). */
   requires: string[];
+  /** `webhook` names on `output.event` nodes (0.5.0), with the nodes naming each. */
+  webhooks: WebhookRef[];
 }
 
 /** `--input` shorthand per source type: video=..., telemetry=... */
@@ -77,7 +80,7 @@ export function inspectTemplate(definition: WorkflowDefinition, catalog: Catalog
   for (const s of sources) {
     if ((shorthandCounts.get(s.inputKey) ?? 0) > 1) s.inputKey = s.nodeId;
   }
-  return { definition, issues, sources, requires: [...requires].sort() };
+  return { definition, issues, sources, requires: [...requires].sort(), webhooks: webhookRefsOf(definition) };
 }
 
 function bindingFor(nodeType: string, filePath: string): EngineSourceBinding {

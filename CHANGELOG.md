@@ -4,6 +4,84 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
+## 0.5.0 (unreleased)
+
+Webhooks on `output.event` and `nodeId` on events. A minor under the policy
+in `docs/compatibility.md`: an additive optional config field, an additive
+field on the event record and on `result.json` / `events.jsonl` / progress
+events, new flags, new environment variables, new exports. The core catalog
+moves from `2b2a3c052696cf1e` to `f8861576c807e382` (28 nodes):
+`output.event` gained `webhook`. Without `core/function` the 26 other defs
+move from `ab458ea46642308b` to `184300277358e824`.
+
+### Added
+
+- `output.event` config `webhook` (optional string, flat): the name of the
+  endpoint each event is delivered to. The template carries the name only;
+  the platform binds it to the org's endpoint of that name, and a local run
+  binds it with the flags below. The executor does not read it.
+- Every event record carries `nodeId`, the `output.event` node that emitted
+  it, stamped by the engine (executors call `ctx.emitEvent` without it; a
+  `nodeId` they pass is ignored). It is written to `events.jsonl`,
+  `result.json`, the NDJSON / callback progress stream and the
+  `IotRunProgress` event payload. `engineEventSchema` and
+  `simEventPayloadSchema` accept it as optional, so a 0.4.0 `result.json`
+  still parses. New type `EngineEventInput` (the record without `nodeId`) is
+  what `ctx.emitEvent` takes.
+- Local webhook delivery: `xwe run --webhook <name>=<url>` (repeatable),
+  `--webhook-secret <name>=<whsec_...>` (repeatable), `--webhooks <file>`
+  (`{ "<name>": { "url", "secret"? } }`), `--allow-insecure-webhooks`, and
+  the environment variables `XWE_WEBHOOK_<NAME>` / `XWE_WEBHOOK_SECRET_<NAME>`
+  (flag > file > env). Each event of a bound node is one POST with the
+  platform envelope (`type: "workflow.event"`, `apiVersion: "2026-09-27"`,
+  `data.nodeId`, `data.run.trigger: "local"`, org/workspace/template fields
+  null) and Standard Webhooks headers (`webhook-id`, `webhook-timestamp`,
+  `webhook-signature: v1,<base64 HMAC-SHA256(key, id.timestamp.body)>`, plus
+  `x-xorgate-event`); unsigned without a secret. Best-effort: one attempt,
+  10 s timeout, no retry, never fails the run; POSTs settle before
+  `engine.run` resolves. URLs must be `https:` (or `http:` with
+  `--allow-insecure-webhooks`) without user-info; a bad URL or secret is a
+  usage error (exit 2) naming the webhook, never the value. An unbound name
+  is warned once and its events are skipped.
+- `engine.run({ webhooks: { bindings, secrets, allowInsecure, env, fetch, timeoutMs } })`,
+  type `EngineWebhookOptions`.
+- `xwe validate` lists the webhook names a template references, each bound
+  (with the URL's origin, signed or unsigned, and where the binding came
+  from) or unbound, and accepts the same webhook flags. Unbound is a warning,
+  not an error. `inspectTemplate` returns `webhooks: [{ name, nodeIds }]`.
+- `./local` exports the webhook helpers: `localWebhookSink`,
+  `resolveWebhookBindings`, `webhookRefsOf`, `signWebhookPayload`,
+  `webhookHeaders`, `workflowEventEnvelope`, `webhookSecretKey`,
+  `generateWebhookSecret`, `webhookUrlProblem`, `webhookEnvVar`,
+  `webhookSecretEnvVar`, `uuidv7`, `WEBHOOK_API_VERSION`. The root exports
+  `WEBHOOK_ENV_PREFIX`.
+- `EngineRunDeps.redact` (optional): values known to be secret before the run,
+  scrubbed like values read through the secrets seam.
+- Fixture `fixtures/templates/overspeed-webhook.json`; the golden suite
+  delivers to a loopback listener and verifies the signature; the smoke test
+  pins a signing vector computed with the `standardwebhooks` package (the
+  platform's core-service test pins the same vector).
+
+### Changed
+
+- Catalog hash `2b2a3c052696cf1e` -> `f8861576c807e382` (see above).
+- `result.json` and `events.jsonl` events gain `nodeId`.
+
+### Security
+
+- Webhook secrets follow the 0.1.0 secret-hygiene rules: registered with the
+  run's redactor, never printed, never written to an artifact or progress
+  message, and `scrubSecretEnv` now also removes every `XWE_WEBHOOK_*`
+  variable (URLs and secrets) from child processes (ffmpeg, function
+  runners). A malformed `--webhooks` file is reported by file and key only.
+
+### Docs
+
+- `output.event`'s `attachClip` is documented as unimplemented: nothing reads
+  it and `clipKey` is always null. The field stays (templates set it); the
+  misleading source comment is gone.
+- README: a Webhooks subsection under Run.
+
 ## 0.4.0 (2026-09-26)
 
 Metric depth and a distance label. A minor under the policy in

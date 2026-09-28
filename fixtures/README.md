@@ -56,6 +56,7 @@ Published schemaVersion-2 definitions, verbatim from the dev DB
 |---|---|---|---|
 | `overspeed.json` | "Overspeed Detect" `bf730702-26de-4875-af12-34c53159abbc` | published v2 | **The golden case.** Telemetry-only: `source.telemetry` (gps.lat/lon/speed) → `telemetry.derivative` (speed_from_position → `speed_kph`) → `logic.threshold` (> 10 kph) → `output.event` (overspeed). Hermetic: no network, no model. |
 | `perimeter-person-detect.json` | "Perimeter Person Detect" `13ee6db3-fdbe-4282-8d9a-1df1eb1fd518` | published v2 | The video+model case: `source.video` → `video.decode_sample` (2 fps) → `model.object_detection` (yolov8n) → `logic.detection_gate` (person) → `output.event`. Exercises the detection path and the model fixture. |
+| `overspeed-webhook.json` | hand-made from `overspeed.json` (0.5.0) | n/a | The local webhook case: `overspeed.json` with `webhook: "dispatch"` on n4 and a second `output.event` n5 (`overspeed_audit`, `webhook: "audit"`) on the same condition. Hermetic; the golden suite binds `dispatch` to a loopback listener and leaves `audit` unbound. |
 | `overspeed-osm.json` | "Overspeed via OSM (scenario 2c demo)" `4daaeb95-e50b-4649-9dab-0fa2d8df7af2` | published v1 | The connector case. NOT for the golden test: it calls public Overpass at run time (real intermittent 429s, see workflow_refactor M7 notes). Kept for manual connector testing. |
 
 Grab command (per template id/version):

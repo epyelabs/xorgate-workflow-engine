@@ -75,10 +75,49 @@ xwe doctor                                                    # ffmpeg, ONNX Run
   limits, no file system, no network, no `XORGATE_SECRET_*`); the return
   value is emitted as `json/result`. `xwe function test` runs one event
   through a node's handler; `examples/functions/` has the docs' example.
+- **Webhooks**: see [Webhooks](#webhooks) below.
 - **Exit codes**: `0` success; `1` the run failed (the failing node is named,
   `result.json` still written); `2` usage or configuration, nothing ran.
 - **Logging**: `--log-level silent | error | info | debug` on any command
   gates stderr only; stdout carries results and the progress stream.
+
+### Webhooks
+
+An `output.event` node's optional `webhook` field names an endpoint (for
+example `dispatch`); the template carries the name, never a URL or secret. On
+the platform the org's endpoint registry binds the name. Locally you bind it:
+
+```bash
+xwe run template.json --input telemetry=window.csv \
+  --webhook dispatch=https://example.com/hooks/xorgate \
+  --webhook-secret dispatch=whsec_...        # optional: sign the POSTs
+xwe validate template.json --webhook dispatch=https://...   # lists each name: bound or unbound
+```
+
+- Bindings come from `--webhook <name>=<url>` (repeatable), a
+  `--webhooks file.json` of `{ "<name>": { "url": "...", "secret"?: "whsec_..." } }`,
+  or `XWE_WEBHOOK_<NAME>` / `XWE_WEBHOOK_SECRET_<NAME>` (name upper-cased,
+  `-` becomes `_`). Flags win over the file, the file over the environment.
+  In a library, `engine.run({ webhooks: { bindings, secrets } })`.
+- Each event from a bound node is one `POST` with the platform's envelope
+  (`{ id, type: "workflow.event", apiVersion, createdAt, organizationId: null,
+  workspaceId: null, data: { nodeId, kind, occurredAt, confidence,
+  payloadSummary, payload, run: { id, trigger: "local", deviceId, ... } } }`)
+  and [Standard Webhooks](https://www.standardwebhooks.com/) headers
+  (`webhook-id`, `webhook-timestamp`, `webhook-signature: v1,<base64 HMAC-SHA256>`),
+  so a receiver verifies local and platform deliveries with the same code.
+  Without a secret the POST is unsigned.
+- URLs must be `https:` and carry no `user:pass@`; `--allow-insecure-webhooks`
+  accepts `http:` for a receiver on your machine.
+- **Local delivery is best-effort**: one attempt per event, a 10 s timeout,
+  no retry, no outbox; a failed POST is logged and never fails the run. A
+  name with no binding is warned about once and its events are skipped. The
+  platform's delivery (retries, delivery log, redelivery) is separate.
+- Webhook secrets are treated like `XORGATE_SECRET_*`: never printed, never
+  in an artifact, and `XWE_WEBHOOK_*` variables are removed from every child
+  process's environment.
+- Every event now carries the `nodeId` that emitted it, in `events.jsonl`,
+  `result.json` and the progress stream.
 
 ## Embed
 
@@ -102,7 +141,7 @@ Three entry points, ESM and CommonJS, with declaration files:
 | Import | Contents |
 | --- | --- |
 | `@xorgate/workflow-engine` | `createEngine` (with `engine.run` and `engine.testFunction`), `runGraph` (the storage-free core over the four host seams), `validateDefinition`, `inspectTemplate`, the catalog (`listNodeTypes`, `buildCatalogPayload`, `createCatalog`, `corePacks`, `defineNode`), the executor helpers, every schema and seam type |
-| `@xorgate/workflow-engine/local` | `localHost` and its parts (`localSources`, `localArtifactSink`, `localSecretReader`, `ndjsonProgress`, `writeRunArtifacts`, `emitVideo`), the model resolver chain, `checkModelDir` |
+| `@xorgate/workflow-engine/local` | `localHost` and its parts (`localSources`, `localArtifactSink`, `localSecretReader`, `ndjsonProgress`, `writeRunArtifacts`, `emitVideo`), the model resolver chain, `checkModelDir`, the webhook helpers (`localWebhookSink`, `signWebhookPayload`, `webhookHeaders`, `workflowEventEnvelope`, ...) |
 | `@xorgate/workflow-engine/testing` | `runConformance` |
 
 Importing any of them loads no native module; ONNX Runtime and the VLM

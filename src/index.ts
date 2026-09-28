@@ -13,6 +13,7 @@ export type {
   Engine,
   EngineRunOptions,
   EngineRunResult,
+  EngineWebhookOptions,
   FunctionTestEvent,
   FunctionTestResult,
   TestFunctionOptions,
@@ -26,7 +27,7 @@ export type { EngineHost, EngineHostBindArgs, EngineBoundRun } from './host';
 export type { LogLevel, LogSink, MessageLevel } from './engine/log';
 export { LOG_LEVELS } from './engine/log';
 // Secret hygiene: the environment a child process may inherit (no XORGATE_SECRET_*).
-export { scrubSecretEnv, SECRET_ENV_PREFIX } from './engine/child-env';
+export { scrubSecretEnv, SECRET_ENV_PREFIX, WEBHOOK_ENV_PREFIX } from './engine/child-env';
 export { REDACTED } from './engine/redact';
 
 // Low level: the core and its seams
@@ -43,6 +44,7 @@ export type {
   DetectionsPayload,
   EngineArtifactSink,
   EngineEmit,
+  EngineEventInput,
   EngineEventRecord,
   EngineInChannel,
   EngineMessage,

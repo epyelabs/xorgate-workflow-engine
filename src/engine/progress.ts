@@ -73,6 +73,7 @@ export type SimStepPayload = z.infer<typeof simStepPayloadSchema>;
 export const simEventPayloadSchema = isoAt.extend({
   runId: z.string().min(1),
   event: z.object({
+    nodeId: z.string().optional(), // 0.5.0+
     kind: z.string(),
     occurredAt: z.string(),
     confidence: z.number(),
@@ -172,6 +173,7 @@ export class IotRunProgress implements EngineProgressSink {
     const payload: SimEventPayload = {
       runId: this.opts.runId,
       event: {
+        nodeId: event.nodeId,
         kind: event.kind,
         occurredAt: event.occurredAt,
         confidence: event.confidence,

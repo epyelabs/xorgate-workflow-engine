@@ -9,6 +9,11 @@ import { createLogger, isLogLevel, LOG_LEVELS, type Logger } from '../engine/log
 import { inspectTemplate, loadDefinition } from '../local/manifest-builder';
 import { localHost } from '../local/host';
 import { ndjsonProgress, resolveFfmpeg } from '../local/target';
+import {
+  resolveWebhookBindings,
+  webhookEnvVar,
+  type EngineWebhookOptions,
+} from '../local/webhooks';
 import { doctorReport } from './doctor';
 import { ModelsUsageError, runModelsCommand } from './models';
 import { loadPacks } from './packs';
@@ -16,10 +21,12 @@ import { loadPacks } from './packs';
 /**
  * xwe — the workflow engine CLI: argument parsing over createEngine + localHost.
  *
- *   xwe validate <template.json> [--pack module]...
+ *   xwe validate <template.json> [--pack module]... [webhook flags]
  *   xwe run <template.json> --input video=./drive.mp4 --input telemetry=./window.csv
  *           [--out ./out] [--run-id id] [--models-dir dir]... [--secrets s.json]
  *           [--progress json] [--emit-video] [--window from,to] [--pack module]...
+ *           [--webhook name=url]... [--webhook-secret name=whsec_...]... [--webhooks file]
+ *           [--allow-insecure-webhooks]
  *   xwe run --manifest <manifest.json> [same flags]
  *   xwe models list | pull <family>/<name>[@v] | path <family>/<name>[@v] | check <dir>
  *   xwe function test <template.json> <nodeId> --event <event.json> [--version n]
@@ -32,7 +39,7 @@ import { loadPacks } from './packs';
  */
 
 const USAGE = `usage:
-  xwe validate <template.json> [--pack <module>]...
+  xwe validate <template.json> [--pack <module>]... [--webhook <name>=<url>]... [--webhooks <file>]
   xwe run <template.json> --input <key>=<path> ... [options]
   xwe run --manifest <manifest.json> [options]
   xwe models list | pull <family>/<name>[@<version>] | path <family>/<name>[@<version>] | check <dir>
@@ -50,6 +57,12 @@ options:
   --emit-video           mux visualization frames into out/<runId>/video/<nodeId>.mp4
   --window <from>,<to>   ISO run window (rarely needed locally)
   --pack <module>        register a node pack (an npm package name or a path, resolved from cwd); repeatable
+  --webhook <name>=<url> bind an output.event node's webhook name to a URL; repeatable (env XWE_WEBHOOK_<NAME>)
+  --webhook-secret <name>=<whsec_...>
+                         sign that webhook's POSTs (Standard Webhooks); repeatable (env XWE_WEBHOOK_SECRET_<NAME>)
+  --webhooks <file>      JSON { "<name>": { "url": "...", "secret"?: "whsec_..." } }; flags win over the file, the file over env
+  --allow-insecure-webhooks
+                         accept http:// webhook URLs (local receivers); https only otherwise
   --event <file>         function test: the event to run through the handler ({ "tag"?, "ts"?, "payload" })
   --version <n>          function test: run a published snapshot instead of the working copy
   --log-level <level>    stderr verbosity on any command: silent | error | info (default) | debug`;
@@ -84,7 +97,7 @@ function extractLogLevel(argv: string[]): { level: string | undefined; rest: str
   return { level, rest };
 }
 
-function cmdValidate(templatePath: string, packs: NodePack[]): number {
+function cmdValidate(templatePath: string, packs: NodePack[], webhooks: EngineWebhookOptions): number {
   const definition = loadDefinition(templatePath);
   const catalog = packs.length > 0 ? createCatalog([...corePacks, ...packs]) : coreCatalog;
   const info = inspectTemplate(definition, catalog);
@@ -112,7 +125,108 @@ function cmdValidate(templatePath: string, packs: NodePack[]): number {
   );
   const other = info.requires.filter((t) => !t.startsWith('secret:'));
   if (other.length > 0) console.log(`other requirements: ${other.join(', ')}`);
+  if (info.webhooks.length === 0) {
+    console.log('webhooks: none');
+    return 0;
+  }
+  let resolved: ReturnType<typeof resolveWebhookBindings>;
+  try {
+    resolved = resolveWebhookBindings(info.webhooks, webhooks);
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+  const bound = new Map(resolved.bound.map((b) => [b.name, b]));
+  const width = Math.max(...info.webhooks.map((r) => r.name.length));
+  console.log('webhooks:');
+  for (const ref of info.webhooks) {
+    const b = bound.get(ref.name);
+    const nodes = `node ${ref.nodeIds.join(', ')}`;
+    console.log(
+      b
+        ? `  ${ref.name.padEnd(width)}   bound -> ${new URL(b.url).origin} (${b.secret ? 'signed' : 'unsigned'}, ${b.source === 'env' ? webhookEnvVar(ref.name) : 'flag/file'})   ${nodes}`
+        : `  ${ref.name.padEnd(width)}   unbound (--webhook ${ref.name}=<url> or ${webhookEnvVar(ref.name)}); events are not delivered   ${nodes}`,
+    );
+  }
+  if (resolved.unbound.length > 0) {
+    logger.info(`xwe: warning: ${resolved.unbound.length} webhook name(s) unbound; a run skips their events`);
+  }
   return 0;
+}
+
+/** name=value pairs from a repeatable flag. The value is never echoed (a secret flag shares this). */
+function parsePairs(flag: string, pairs: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const pair of pairs) {
+    const eq = pair.indexOf('=');
+    if (eq <= 0 || eq === pair.length - 1) fail(`${flag} must be <name>=<value>${eq > 0 ? ` (for "${pair.slice(0, eq)}")` : ''}`);
+    out[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return out;
+}
+
+/**
+ * `--webhooks <file>`: `{ "<name>": { "url": "...", "secret"?: "whsec_..." } }`.
+ * Like `--secrets`, errors name the file and the key only, never contents.
+ */
+function readWebhooksFile(file: string): { bindings: Record<string, string>; secrets: Record<string, string> } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    return fail(`--webhooks ${file}: ${code ? `cannot read it (${code})` : 'not valid JSON'} (expected { "<name>": { "url": "...", "secret"?: "whsec_..." } })`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return fail(`--webhooks ${file}: expected a JSON object of { "<name>": { "url": "...", "secret"?: "..." } }`);
+  }
+  const bindings: Record<string, string> = {};
+  const secrets: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parsed as Record<string, unknown>)) {
+    const v = value as { url?: unknown; secret?: unknown } | null;
+    if (!v || typeof v !== 'object' || typeof v.url !== 'string') fail(`--webhooks ${file}: "${name}" needs a string "url"`);
+    if (v.secret !== undefined && typeof v.secret !== 'string') fail(`--webhooks ${file}: the "secret" of "${name}" must be a string`);
+    bindings[name] = v.url as string;
+    if (typeof v.secret === 'string') secrets[name] = v.secret;
+  }
+  return { bindings, secrets };
+}
+
+interface WebhookFlags {
+  webhook: string[];
+  webhookSecret: string[];
+  webhooks?: string;
+  allowInsecureWebhooks?: boolean;
+}
+
+/** Flags win over the file; `XWE_WEBHOOK_*` fills the rest (resolved by the engine per referenced name). */
+function webhookOptions(flags: WebhookFlags): EngineWebhookOptions {
+  const file = flags.webhooks ? readWebhooksFile(flags.webhooks) : { bindings: {}, secrets: {} };
+  return {
+    bindings: { ...file.bindings, ...parsePairs('--webhook', flags.webhook) },
+    secrets: { ...file.secrets, ...parsePairs('--webhook-secret', flags.webhookSecret) },
+    ...(flags.allowInsecureWebhooks ? { allowInsecure: true } : {}),
+  };
+}
+
+const WEBHOOK_OPTIONS = {
+  webhook: { type: 'string', multiple: true },
+  'webhook-secret': { type: 'string', multiple: true },
+  webhooks: { type: 'string' },
+  'allow-insecure-webhooks': { type: 'boolean' },
+} as const;
+
+function webhookFlagsOf(values: {
+  webhook?: string[];
+  'webhook-secret'?: string[];
+  webhooks?: string;
+  'allow-insecure-webhooks'?: boolean;
+}): WebhookFlags {
+  return {
+    webhook: values.webhook ?? [],
+    webhookSecret: values['webhook-secret'] ?? [],
+    webhooks: values.webhooks,
+    allowInsecureWebhooks: values['allow-insecure-webhooks'],
+  };
 }
 
 /**
@@ -157,6 +271,7 @@ interface RunFlags {
   window?: string;
   pull?: boolean;
   pack: string[];
+  webhooks: WebhookFlags;
 }
 
 async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promise<number> {
@@ -186,6 +301,7 @@ async function cmdRun(templatePath: string | undefined, flags: RunFlags): Promis
   if (flags.progress !== undefined && flags.progress !== 'json') fail(`--progress takes "json", got "${flags.progress}"`);
 
   const secretsFile = flags.secrets ? readSecretsFile(flags.secrets) : undefined;
+  runOptions.webhooks = webhookOptions(flags.webhooks);
 
   const engine = createEngine({
     ...(packs.length > 0 ? { packs } : {}),
@@ -279,12 +395,12 @@ async function main(): Promise<number> {
     const { values, positionals } = parseArgs({
       args: rest,
       allowPositionals: true,
-      options: { pack: { type: 'string', multiple: true } },
+      options: { pack: { type: 'string', multiple: true }, ...WEBHOOK_OPTIONS },
     });
     const templatePath = positionals[0];
     if (!templatePath) fail(`validate needs a template path\n${USAGE}`);
     const packs = await loadPacks(values.pack ?? [], { log: (line) => logger.info(line) });
-    return cmdValidate(templatePath, packs);
+    return cmdValidate(templatePath, packs, webhookOptions(webhookFlagsOf(values)));
   }
   if (command === 'run') {
     const { values, positionals } = parseArgs({
@@ -302,6 +418,7 @@ async function main(): Promise<number> {
         window: { type: 'string' },
         pull: { type: 'boolean' },
         pack: { type: 'string', multiple: true },
+        ...WEBHOOK_OPTIONS,
       },
     });
     return cmdRun(positionals[0], {
@@ -316,6 +433,7 @@ async function main(): Promise<number> {
       window: values.window,
       pull: values.pull,
       pack: values.pack ?? [],
+      webhooks: webhookFlagsOf(values),
     });
   }
   if (command === 'models') {

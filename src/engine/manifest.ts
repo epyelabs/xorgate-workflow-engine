@@ -92,6 +92,8 @@ export const engineStepSchema = z.object({
 });
 
 export const engineEventSchema = z.object({
+  // Written by 0.5.0+; optional on read so an older result.json still parses.
+  nodeId: z.string().optional(),
   kind: z.string(),
   occurredAt: z.string(),
   confidence: z.number().default(1),

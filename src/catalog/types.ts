@@ -458,12 +458,17 @@ export type EngineSourceBinding = { kind: string } & Record<string, unknown>;
 
 /** An event record collected by output.event, persisted by the finalize path. */
 export interface EngineEventRecord {
+  /** The node that emitted it (additive, 0.5.0); stamped by the engine, not the executor. */
+  nodeId: string;
   kind: string;
   occurredAt: string; // ISO-8601
   confidence: number;
   payloadSummary: string;
   payload?: unknown;
 }
+
+/** What an executor hands `ctx.emitEvent`: the record without `nodeId`, which the engine stamps. */
+export type EngineEventInput = Omit<EngineEventRecord, 'nodeId'>;
 
 /**
  * Per-node run context. Constructed by the engine core; the collector callbacks
@@ -487,8 +492,8 @@ export interface EngineRunCtx {
   secrets: EngineSecretReader | null;
   /** HTTP layer for connector executors; injectable so tests run offline. */
   http: typeof fetch;
-  /** Collect an event (output.event). */
-  emitEvent(event: EngineEventRecord): void;
+  /** Collect an event (output.event); the engine stamps `nodeId` (a `nodeId` given here is ignored). */
+  emitEvent(event: EngineEventInput): void;
   /** Collect a captured record (output.data_capture). */
   captureRecord(record: unknown): void;
   /** Human one-liner for the node's step row (last call wins). */

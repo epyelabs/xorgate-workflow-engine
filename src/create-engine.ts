@@ -12,6 +12,14 @@ import { buildLocalManifest, loadDefinition, parseTemplate } from './local/manif
 import { captureFormatsOf } from './local/capture-formats';
 import { objectProgress, teeProgress, type EngineProgressMessage } from './local/target';
 import {
+  localWebhookSink,
+  resolveWebhookBindings,
+  webhookEnvVar,
+  webhookRefsOf,
+  type EngineWebhookOptions,
+  type LocalWebhookSink,
+} from './local/webhooks';
+import {
   FunctionLoadError,
   FunctionProcess,
   joinTrace,
@@ -32,6 +40,8 @@ import { resolveFunctionCode, type FunctionConfig } from './catalog/nodes/functi
  * file. The CLI maps it to exit code 2. A run that started and failed is not
  * an error: it resolves with `result.status === "failed"`.
  */
+export type { EngineWebhookOptions } from './local/webhooks';
+
 export class XweUsageError extends Error {
   readonly exitCode = 2;
   constructor(message: string, options?: { cause?: unknown }) {
@@ -77,6 +87,14 @@ export interface EngineRunOptions {
   progress?: (message: EngineProgressMessage) => void;
   /** Wall-clock budget; on expiry everything is cancelled and the run fails. */
   deadlineMs?: number;
+  /**
+   * Local webhook delivery (0.5.0): binds the `webhook` names on the graph's
+   * `output.event` nodes to URLs (and optional `whsec_` signing secrets).
+   * `XWE_WEBHOOK_<NAME>` / `XWE_WEBHOOK_SECRET_<NAME>` in `env` (default
+   * `process.env`) fill names the options leave unbound. Best-effort: one
+   * POST per event, no retry. Unbound names are logged once and skipped.
+   */
+  webhooks?: EngineWebhookOptions;
 }
 
 export interface EngineRunResult {
@@ -242,6 +260,50 @@ function withSecretOverrides(
   };
 }
 
+/**
+ * The run's webhook sink, or null when the graph names no webhook. Throws a
+ * usage error (naming the webhook, never the value) on a URL or secret that
+ * breaks the policy; logs each unbound name once.
+ */
+function bindWebhooks(
+  manifest: RunManifest,
+  runId: string,
+  options: EngineWebhookOptions | undefined,
+  log: (message: string) => void,
+): { sink: LocalWebhookSink; secrets: string[] } | null {
+  const refs = webhookRefsOf(manifest.definition);
+  if (refs.length === 0) return null;
+  let resolved;
+  try {
+    resolved = resolveWebhookBindings(refs, options ?? {});
+  } catch (err) {
+    return usage(err);
+  }
+  for (const ref of resolved.unbound) {
+    log(
+      `warning: webhook "${ref.name}" (node ${ref.nodeIds.join(', ')}) is not bound; its events are not delivered (--webhook ${ref.name}=<url> or ${webhookEnvVar(ref.name)})`,
+    );
+  }
+  if (resolved.bound.length === 0) return null;
+  const routes = new Map<string, string>();
+  for (const ref of refs) for (const id of ref.nodeIds) routes.set(id, ref.name);
+  for (const b of resolved.bound) {
+    log(`webhook "${b.name}" -> ${new URL(b.url).origin} (${b.secret ? 'signed' : 'unsigned'}, best-effort)`);
+  }
+  return {
+    sink: localWebhookSink({
+      routes,
+      bindings: new Map(resolved.bound.map((b) => [b.name, b])),
+      runId,
+      deviceId: manifest.deviceId,
+      ...(options?.fetch ? { fetch: options.fetch } : {}),
+      ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+      log,
+    }),
+    secrets: resolved.bound.flatMap((b) => (b.secret ? [b.secret] : [])),
+  };
+}
+
 export function createEngine(options: CreateEngineOptions): Engine {
   if (!options || !options.host || typeof options.host.bind !== 'function') {
     throw new XweUsageError('createEngine needs a host: createEngine({ host: localHost({ ... }) })');
@@ -279,6 +341,8 @@ export function createEngine(options: CreateEngineOptions): Engine {
       const rawBindings: Record<string, EngineSourceBinding> = Object.fromEntries(
         manifest.inputs.map((i) => [i.nodeId, i.binding]),
       );
+      // Before bind: a bad webhook URL or secret is a usage error and nothing runs.
+      const webhookSink = bindWebhooks(manifest, runId, runOptions.webhooks, (m) => logger.info(m));
       const bound = await host.bind({
         runId,
         manifest,
@@ -289,6 +353,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
       const progress = teeProgress(
         bound.progress,
         runOptions.progress ? objectProgress(runOptions.progress) : undefined,
+        webhookSink?.sink,
       );
       logger.debug(`run ${runId}: artifacts -> ${bound.runDir}`);
       const secrets = withSecretOverrides(bound.secrets, runOptions.secrets);
@@ -317,6 +382,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
             ...(bound.httpFetch ? { httpFetch: bound.httpFetch } : {}),
             ...(progress ? { progress } : {}),
             ...(deadlineMs ? { deadlineMs } : {}),
+            ...(webhookSink && webhookSink.secrets.length > 0 ? { redact: webhookSink.secrets } : {}),
             log: logger.sink,
             catalog,
           },
@@ -324,7 +390,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
       } catch (err) {
         // Engine-level crash: still land a result.json, like every target does.
         // Run-level secret values are the only ones known here; scrub them.
-        const redactor = createRedactor(Object.values(runOptions.secrets ?? {}));
+        const redactor = createRedactor([...Object.values(runOptions.secrets ?? {}), ...(webhookSink?.secrets ?? [])]);
         outcome = {
           status: 'failed',
           error: redactor.text(err instanceof Error ? err.message : String(err)),
@@ -337,6 +403,9 @@ export function createEngine(options: CreateEngineOptions): Engine {
       }
 
       const result = await bound.writeArtifacts(outcome, formats);
+      // Local webhook POSTs are fire-and-forget during the run; settle them
+      // before the run resolves so a CLI exit does not cut them off.
+      if (webhookSink) await webhookSink.sink.flush();
       if (runOptions.emitVideo && outcome.status === 'succeeded' && bound.afterSuccess) {
         await bound.afterSuccess();
       }

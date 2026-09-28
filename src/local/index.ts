@@ -51,3 +51,28 @@ export type { PullOptions, PullResult } from './registry-client';
 export { checkModelDir, formatModelCheckLine } from './check-model';
 export type { CheckModelDirOptions, ModelCheckLine, ModelCheckReport, ModelCheckStage } from './check-model';
 export { displayPath, modelCacheDir } from './paths';
+
+// Local webhook delivery (0.5.0): the sink `engine.run({ webhooks })` uses and
+// the Standard Webhooks signing it shares with the platform.
+export {
+  generateWebhookSecret,
+  localWebhookSink,
+  resolveWebhookBindings,
+  signWebhookPayload,
+  uuidv7,
+  WEBHOOK_API_VERSION,
+  webhookEnvVar,
+  webhookHeaders,
+  webhookRefsOf,
+  webhookSecretEnvVar,
+  webhookSecretKey,
+  webhookUrlProblem,
+  workflowEventEnvelope,
+} from './webhooks';
+export type {
+  EngineWebhookOptions,
+  LocalWebhookSink,
+  WebhookBinding,
+  WebhookRef,
+  WorkflowEventEnvelope,
+} from './webhooks';

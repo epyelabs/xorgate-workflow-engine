@@ -52,6 +52,8 @@ export interface InspectTemplateResult {
   inputs: TemplateInput[];
   /** Capability tokens across the graph: `secret:<name>`, `video`, `metric:<name>`. */
   requires: string[];
+  /** Webhook names on `output.event` nodes (0.5.0): bind each with `--webhook <name>=<url>` or `run({ webhooks })`. */
+  webhooks: Array<{ name: string; nodeIds: string[] }>;
 }
 
 /** What a run of this template would need; the report `xwe validate` prints. Throws when the template does not parse. `catalog` defaults to the core catalog. */
@@ -62,5 +64,6 @@ export function inspectTemplate(template: unknown, catalog: Catalog = coreCatalo
     issues: info.issues,
     inputs: info.sources.map((s) => ({ key: s.inputKey, nodeId: s.nodeId, type: s.type, label: s.label })),
     requires: info.requires,
+    webhooks: info.webhooks,
   };
 }

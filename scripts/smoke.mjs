@@ -73,6 +73,7 @@ check('esm testing.runConformance without a host rejects with XweUsageError (exi
 check('cjs testing exports CONFORMANCE_CASE_NAMES (four cases) and CONFORMANCE_EXPECTATIONS (the pinned values)', JSON.stringify(cjsTesting.CONFORMANCE_CASE_NAMES) === JSON.stringify(['overspeed', 'detection', 'visualization', 'missing-input']) && cjsTesting.CONFORMANCE_EXPECTATIONS.overspeedAt === '2026-08-12T23:56:01.289Z' && cjsTesting.CONFORMANCE_EXPECTATIONS.detections === 81 && cjsTesting.CONFORMANCE_EXPECTATIONS.frames === 50, JSON.stringify(cjsTesting.CONFORMANCE_EXPECTATIONS));
 // 2b. Secret hygiene and log levels (M5): the exports, the env scrub and the redactor's reach.
 check('root exports LOG_LEVELS, scrubSecretEnv, SECRET_ENV_PREFIX and REDACTED', JSON.stringify(cjsRoot.LOG_LEVELS) === JSON.stringify(['silent', 'error', 'info', 'debug']) && typeof cjsRoot.scrubSecretEnv === 'function' && cjsRoot.SECRET_ENV_PREFIX === 'XORGATE_SECRET_' && cjsRoot.REDACTED === '[redacted]');
+check('scrubSecretEnv drops every XWE_WEBHOOK_* entry (URLs and secrets, 0.5.0) too', JSON.stringify(cjsRoot.scrubSecretEnv({ PATH: '/bin', XWE_WEBHOOK_DISPATCH: 'https://x', XWE_WEBHOOK_SECRET_DISPATCH: 'whsec_x', XWE_MODELS_DIR: '/m' })) === JSON.stringify({ PATH: '/bin', XWE_MODELS_DIR: '/m' }) && cjsRoot.WEBHOOK_ENV_PREFIX === 'XWE_WEBHOOK_');
 check('scrubSecretEnv drops every XORGATE_SECRET_* entry and keeps the rest', JSON.stringify(cjsRoot.scrubSecretEnv({ PATH: '/bin', XORGATE_SECRET_A: 'x', XORGATE_SECRET_B_C: 'y', FFMPEG_PATH: '/f' })) === JSON.stringify({ PATH: '/bin', FFMPEG_PATH: '/f' }));
 {
   // runGraph scrubs a value read through the secrets seam from the outcome and every progress message.
@@ -88,6 +89,33 @@ check('scrubSecretEnv drops every XORGATE_SECRET_* entry and keeps the rest', JS
   );
   const everything = JSON.stringify({ outcome, msgs });
   check('runGraph redacts a secret read through the seam from the outcome, the progress messages and the log', outcome.status === 'failed' && outcome.failedNodeId === 'roads' && !everything.includes(FAKE) && everything.includes('[redacted]') && outcome.error.includes('apikey=[redacted]') && outcome.error.includes('(key [redacted])'), outcome.error);
+}
+
+// 2c. Webhooks (0.5.0): the ./local surface, the shared signing vector (the
+// platform's core-service unit test pins the same one), and nodeId being
+// optional on read so a 0.4.0 result.json still parses.
+{
+  const names = ['localWebhookSink', 'resolveWebhookBindings', 'signWebhookPayload', 'webhookHeaders', 'webhookRefsOf', 'webhookSecretKey', 'webhookUrlProblem', 'workflowEventEnvelope', 'generateWebhookSecret', 'uuidv7', 'webhookEnvVar', 'webhookSecretEnvVar'];
+  check('cjs local exports the webhook helpers', names.every((n) => typeof cjsLocal[n] === 'function') && cjsLocal.WEBHOOK_API_VERSION === '2026-09-27', names.filter((n) => typeof cjsLocal[n] !== 'function').join(','));
+  // Computed independently with the `standardwebhooks` npm package (Webhook#sign).
+  const V = {
+    secret: 'whsec_eG9yZ2F0ZS13ZWJob29rcy1zaGFyZWQtdmVjdG9yLTMyYg==',
+    id: '01928f3e-5c2a-7b4d-8e9f-0a1b2c3d4e5f',
+    ts: 1790000000,
+    body: '{"id":"01928f3e-5c2a-7b4d-8e9f-0a1b2c3d4e5f","type":"ping","apiVersion":"2026-09-27","data":{"message":"hello"}}',
+    sig: 'v1,eunRXoEGTAdBvdruPkA9OUvMYGdgpA+cG8cpxQnFfVM=',
+  };
+  check('signWebhookPayload matches the shared Standard Webhooks vector', cjsLocal.signWebhookPayload({ id: V.id, timestamp: V.ts, body: V.body, secrets: [V.secret] }) === V.sig);
+  const two = cjsLocal.signWebhookPayload({ id: V.id, timestamp: V.ts, body: V.body, secrets: [V.secret, cjsLocal.generateWebhookSecret()] }).split(' ');
+  check('two secrets give two space-separated v1 signatures, the first the vector', two.length === 2 && two[0] === V.sig && two[1].startsWith('v1,'));
+  check('generateWebhookSecret is whsec_ + standard base64 of 32 bytes', /^whsec_[A-Za-z0-9+/]{43}=$/.test(cjsLocal.generateWebhookSecret()) && cjsLocal.webhookSecretKey(cjsLocal.generateWebhookSecret()).length === 32);
+  let refused = '';
+  try { cjsLocal.webhookSecretKey('plain-LEAKME'); } catch (e) { refused = e.message; }
+  check('webhookSecretKey refuses a non-whsec secret without quoting it', refused.includes('whsec_') && !refused.includes('LEAKME'), refused);
+  check('webhookUrlProblem: https ok, http only with allowInsecure, user-info refused', cjsLocal.webhookUrlProblem('https://h.test/x') === null && cjsLocal.webhookUrlProblem('http://127.0.0.1:1/') !== null && cjsLocal.webhookUrlProblem('http://127.0.0.1:1/', { allowInsecure: true }) === null && cjsLocal.webhookUrlProblem('https://a:b@h.test/') !== null && cjsLocal.webhookUrlProblem('ftp://h.test/') !== null);
+  check('uuidv7 is a version-7 RFC 9562 id', /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(cjsLocal.uuidv7()));
+  const old = { kind: 'overspeed', occurredAt: '2026-08-12T23:56:01.289Z', confidence: 1, payloadSummary: 'overspeed', clipKey: null };
+  check('engineEventSchema parses a 0.4.0 event (no nodeId) and keeps a 0.5.0 nodeId', cjsRoot.engineEventSchema.safeParse(old).success && cjsRoot.engineEventSchema.parse({ ...old, nodeId: 'n4' }).nodeId === 'n4');
 }
 
 // 3. Catalog registry loads with all 28 node defs; payload hash printed.
@@ -139,11 +167,14 @@ check(
   check('payload.packs is one core entry whose hash is catalogVersion (no packs registered)', Array.isArray(payload.packs) && payload.packs.length === 1 && payload.packs[0].name === 'core' && payload.packs[0].hash === payload.catalogVersion && payload.packs[0].version === JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version, JSON.stringify(payload.packs));
   // The core hash moves on purpose on minors (docs/compatibility.md): 0.2.0 added the two
   // function nodes (08c8c39436928e5e); 0.4.0 added output.visualization's `distance`
-  // overlay, model.depth's distanceScale and proximity_gate's maxDistanceM (2b2a3c052696cf1e). Without core/function the 26
-  // older defs hash to ab458ea46642308b (0.1.0-0.3.0: e481243f5ffe4678).
-  check('catalogVersion is the 0.4.0 core hash 2b2a3c052696cf1e', payload.catalogVersion === '2b2a3c052696cf1e', payload.catalogVersion);
+  // overlay, model.depth's distanceScale and proximity_gate's maxDistanceM (2b2a3c052696cf1e);
+  // 0.5.0 added output.event's `webhook` (f8861576c807e382). Without core/function the 26
+  // older defs hash to 184300277358e824 (0.4.0: ab458ea46642308b; 0.1.0-0.3.0: e481243f5ffe4678).
+  check('catalogVersion is the 0.5.0 core hash f8861576c807e382', payload.catalogVersion === 'f8861576c807e382', payload.catalogVersion);
   const withoutFunctions = cjsRoot.buildCatalogPayload(cjsRoot.createCatalog(cjsRoot.corePacks.filter((p) => p.name !== 'core/function')));
-  check('without core/function the 26 non-function defs hash to 0.4.0\'s ab458ea46642308b', withoutFunctions.nodes.length === 26 && withoutFunctions.catalogVersion === 'ab458ea46642308b', withoutFunctions.catalogVersion);
+  check('without core/function the 26 non-function defs hash to 0.5.0\'s 184300277358e824', withoutFunctions.nodes.length === 26 && withoutFunctions.catalogVersion === '184300277358e824', withoutFunctions.catalogVersion);
+  const oe = payload.nodes.find((n) => n.type === 'output.event');
+  check('output.event config gains an optional flat string `webhook` (0.5.0)', oe?.configSchema?.properties?.webhook?.type === 'string' && !(oe.configSchema.required ?? []).includes('webhook') && oe.configDefaults?.webhook === undefined, JSON.stringify(oe?.configSchema?.properties?.webhook));
   // 0.4.0 metric depth: the pure helpers behind distanceM and the distance label.
   {
     const vision = require(join(root, 'dist/cjs/engine/vision.js'));

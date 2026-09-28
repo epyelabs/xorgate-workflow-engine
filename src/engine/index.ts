@@ -74,6 +74,11 @@ export interface EngineRunDeps {
   log?: (message: string, level: MessageLevel) => void;
   /** The node registry to run against (default: the core catalog). */
   catalog?: Catalog;
+  /**
+   * Values known to be secret before the run starts (0.5.0: webhook signing
+   * secrets), scrubbed like values read through the secrets seam.
+   */
+  redact?: string[];
 }
 
 export interface EngineStep {
@@ -160,7 +165,7 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
   // Secret hygiene: values read through the secrets seam are scrubbed from
   // every string that leaves this function (summaries, errors, events,
   // captures, progress messages, log lines). See ./redact.ts.
-  const redactor = createRedactor();
+  const redactor = createRedactor(deps.redact ?? []);
   const rawLog = deps.log ?? ((m: string) => console.log(`engine[${spec.runId}]: ${m}`));
   const log = (m: string, level: MessageLevel = 'info'): void => rawLog(redactor.text(m), level);
   const secrets = deps.secrets ? redactor.wrapSecrets(deps.secrets) : undefined;
@@ -328,8 +333,9 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
         binding: spec.bindings[nodeId] ?? null,
         sources: deps.sources,
         artifacts: deps.artifacts ?? null,
-        emitEvent: (event) => {
+        emitEvent: (input) => {
           if (!state.aborted) {
+            const event: EngineEventRecord = { ...input, nodeId };
             events.push(event);
             progress?.event(event);
           }

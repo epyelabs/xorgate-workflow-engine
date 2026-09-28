@@ -4,7 +4,10 @@ import type { ConditionPayload, EngineEmit, EngineInChannel, EngineRunCtx } from
 import { defineNode } from '../types';
 
 // Collects a workflow event on each rising edge of the input condition; the
-// finalize path persists them as workflow_events rows.
+// finalize path persists them as workflow_events rows. The engine stamps each
+// event with this node's id; `webhook` names the endpoint the platform (or
+// `xwe run --webhook <name>=<url>` locally) delivers it to. The executor never
+// reads `webhook`: delivery is the host's job.
 
 const configSchema = z.object({
   kind: z.string().min(1).default('detection').describe('Event kind, e.g. harsh_brake'),
@@ -15,6 +18,11 @@ const configSchema = z.object({
     .min(0)
     .default(0)
     .describe('Minimum spacing between emitted events'),
+  webhook: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Endpoint name to deliver each event to (bound per org on the platform, or with --webhook locally)'),
 });
 
 export const def = defineNode({
@@ -33,8 +41,6 @@ export const def = defineNode({
   runtime: { target: 'any' },
 });
 
-// attachClip is honored by the media engine target (session 2); on a
-// telemetry-only run there is no video to clip.
 export const executor = async function* outputEvent(
   inputs: EngineInChannel[],
   config: unknown,
