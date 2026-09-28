@@ -1,6 +1,6 @@
 {
   "name": "@xorgate/workflow-engine",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "The xorgate workflow engine as a library and the xwe command: run workflow templates over video and telemetry files with a 28-node catalog, including code function nodes, no platform account required.",
   "license": "MIT",
   "author": "Epye Labs",
