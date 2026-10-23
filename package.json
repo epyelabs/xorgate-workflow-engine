@@ -86,7 +86,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepack": "npm run build",
     "smoke": "npm run fixtures:pull && npm run build && node scripts/smoke.mjs",
-    "test": "npm run fixtures:pull && npm run build && node scripts/golden-test.mjs",
+    "test": "npm run fixtures:pull && npm run build && node scripts/golden-test.mjs && node test/connector/connector-test.mjs",
     "verify:tarball": "node scripts/verify-tarball.mjs",
     "ci": "npm run typecheck && npm run smoke && npm test && npm run verify:tarball"
   },

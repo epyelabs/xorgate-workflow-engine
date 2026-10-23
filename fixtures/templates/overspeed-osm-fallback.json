@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 2,
+  "nodes": [
+    {
+      "id": "src",
+      "type": "source.telemetry",
+      "position": {
+        "x": 40,
+        "y": 120
+      },
+      "data": {
+        "label": "Speed + position",
+        "config": {
+          "metrics": [
+            "obd.speed",
+            "gps.lat",
+            "gps.lon"
+          ]
+        }
+      }
+    },
+    {
+      "id": "rs",
+      "type": "telemetry.resample",
+      "position": {
+        "x": 320,
+        "y": 300
+      },
+      "data": {
+        "label": "Every 10 s",
+        "config": {
+          "intervalSeconds": 10,
+          "method": "hold"
+        }
+      }
+    },
+    {
+      "id": "roads",
+      "type": "connector.third_party",
+      "position": {
+        "x": 600,
+        "y": 300
+      },
+      "data": {
+        "label": "Speed limit (OSM, null on no answer)",
+        "config": {
+          "provider": "osm",
+          "maxLookupsPerRun": 500,
+          "cacheTtlSeconds": 3600,
+          "emitNoAnswer": true,
+          "onLookupError": "skip"
+        }
+      }
+    },
+    {
+      "id": "cmp",
+      "type": "logic.comparator",
+      "position": {
+        "x": 880,
+        "y": 120
+      },
+      "data": {
+        "label": "Speed > limit + 5 (assume 50 without one)",
+        "config": {
+          "signal": "obd.speed",
+          "operator": "gt",
+          "field": "speedLimitKph",
+          "margin": 5,
+          "fallbackReference": 50,
+          "maxReferenceAgeMs": 5000
+        }
+      }
+    },
+    {
+      "id": "deb",
+      "type": "logic.debounce",
+      "position": {
+        "x": 1160,
+        "y": 120
+      },
+      "data": {
+        "label": "Held 10 s",
+        "config": {
+          "minDurationMs": 10000,
+          "cooldownMs": 0
+        }
+      }
+    },
+    {
+      "id": "evt",
+      "type": "output.event",
+      "position": {
+        "x": 1440,
+        "y": 120
+      },
+      "data": {
+        "label": "Overspeed",
+        "config": {
+          "kind": "overspeed",
+          "cooldownSeconds": 60
+        }
+      }
+    },
+    {
+      "id": "cap",
+      "type": "output.data_capture",
+      "position": {
+        "x": 880,
+        "y": 300
+      },
+      "data": {
+        "label": "Speed limits looked up",
+        "config": {
+          "format": "jsonl"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_src_rs_telemetry",
+      "source": "src",
+      "target": "rs",
+      "sourceHandle": "telemetry",
+      "targetHandle": "telemetry"
+    },
+    {
+      "id": "e_rs_roads_positions",
+      "source": "rs",
+      "target": "roads",
+      "sourceHandle": "telemetry",
+      "targetHandle": "positions"
+    },
+    {
+      "id": "e_rs_cmp_signal",
+      "source": "rs",
+      "target": "cmp",
+      "sourceHandle": "telemetry",
+      "targetHandle": "signal"
+    },
+    {
+      "id": "e_roads_cmp_reference",
+      "source": "roads",
+      "target": "cmp",
+      "sourceHandle": "speed_limit",
+      "targetHandle": "reference"
+    },
+    {
+      "id": "e_cmp_deb_condition",
+      "source": "cmp",
+      "target": "deb",
+      "sourceHandle": "condition",
+      "targetHandle": "condition"
+    },
+    {
+      "id": "e_deb_evt_condition",
+      "source": "deb",
+      "target": "evt",
+      "sourceHandle": "condition",
+      "targetHandle": "condition"
+    },
+    {
+      "id": "e_roads_cap_records",
+      "source": "roads",
+      "target": "cap",
+      "sourceHandle": "speed_limit",
+      "targetHandle": "records"
+    }
+  ]
+}

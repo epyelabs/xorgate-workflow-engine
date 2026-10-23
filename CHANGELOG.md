@@ -4,6 +4,75 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
+## Unreleased
+
+### Connector and comparator
+
+A minor under `docs/compatibility.md`: additive optional config on
+`connector.third_party` and `logic.comparator`, additive fields on their
+records, new exports from the connector module. The core catalog moves from
+`f8861576c807e382` to `4b1a1732646c0e0d` (28 nodes); without `core/function`
+the 26 other defs move from `184300277358e824` to `3759a3cca37524e3`.
+
+#### Added (P0.3: rate policy, retries, timeouts, error budget, no-answer records)
+
+- `connector.third_party` config, all optional with defaults:
+  - `maxRequestsPerSecond`: token-bucket pacing, burst 1. Default per
+    provider: OSM 1 (plus up to 250 ms jitter, as before), HERE 5, Google
+    Roads 10.
+  - `retry: { attempts: 4, baseMs: 500, maxMs: 8000 }`: retries on HTTP 429
+    and 5xx with full-jitter exponential back-off. A `Retry-After` header
+    (delta-seconds or HTTP-date) is honoured instead, up to 60 s; a longer one
+    ends the lookup's attempts. `attempts` counts the first request.
+  - `requestTimeoutMs` (default 10000): an `AbortSignal` on `ctx.http`, raced
+    so a fetch that ignores the signal still times out; covers the body read.
+  - `onLookupError: 'fail' | 'skip'` (default `fail`) and `maxErrorRatio`
+    (default 0.2). With `skip`, a lookup that still fails after its retries
+    (or times out) is a no-answer for that position; the node fails once the
+    failed share exceeds `maxErrorRatio` after at least 10 lookups, or at the
+    end of the input when every lookup failed. A rejected key (401/403)
+    always fails the node.
+  - `emitNoAnswer` (default false): positions without a limit emit
+    `{ ts, speedLimitKph: null, source, reason }`, `reason` one of
+    `no_answer`, `capped` (past `maxLookupsPerRun`) or `error` (skip path).
+  - `osmEndpoint` (default `https://overpass-api.de/api/interpreter`).
+- `logic.comparator` config `maxReferenceAgeMs` (a held reference older than
+  this is stale) and `fallbackReference` (the value used when there is no
+  usable record: none yet, a null field, or stale; without it such samples are
+  skipped). The condition `meta` gains `referenceSource: 'record' | 'fallback'`
+  and `referenceAgeMs` (sample ts minus the record's ts, null before any
+  record). Together with `emitNoAnswer` this moves Alocate's "held limit,
+  assume 50" rule (driver-behaviour CONTRACT 3.1) into the template: on the
+  M0-P0 stale-limit shape the false events are dropped and real ones are
+  compared against the assumed limit.
+- Connector module exports (deep, not from the root): `RequestThrottle`
+  (now token-bucket: `new RequestThrottle(ratePerSecond, { jitterMs, burst,
+  clock })`), `requestWithPolicy`, `parseRetryAfter`, `backoffDelayMs`,
+  `ConnectorFatalError`, `ConnectorLookupError`, `DEFAULT_REQUESTS_PER_SECOND`,
+  and the internal clock seam `connectorClock` / `resetConnectorClock` used by
+  the tests. `buildOverpassRequest` takes an optional endpoint.
+- Fixture `fixtures/templates/overspeed-osm-fallback.json`: the production
+  overspeed graph (10 s hold grid, OSM) with `emitNoAnswer` + `skip` on the
+  connector and `fallbackReference: 50`, `maxReferenceAgeMs: 5000` on the
+  comparator.
+- `test/connector/connector-test.mjs`, run by `npm test`: pacing on a virtual
+  clock, 429 then success with and without `Retry-After`, a hung fetch hitting
+  the timeout, the skip path and the error budget, `emitNoAnswer`, and the
+  stale-limit scenario on the production graph.
+
+#### Executor behaviour
+
+- `connector.third_party`: HERE and Google Roads lookups are now paced (5 and
+  10 per second) and retried on 429/5xx instead of failing on the first one.
+  OSM's single fixed 3 s back-off is replaced by the retry policy above. The
+  step summary is set even when the node fails, and a failure message ends
+  with the lookup counts in brackets. Failure messages after retries say
+  `after N attempts`.
+- `logic.comparator`: a reference record whose field is `null` clears the
+  held reference (before, it was ignored and the old value held). The
+  connector emits such records only with `emitNoAnswer`, so existing graphs
+  are unaffected.
+
 ## 0.5.0 (2026-09-28)
 
 Webhooks on `output.event` and `nodeId` on events. A minor under the policy

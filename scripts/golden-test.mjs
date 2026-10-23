@@ -231,7 +231,7 @@ for (const [fmt, argv, imports] of [
       const prev = i === 0 ? 0 : lines.findIndex((l) => l.startsWith(`  ${all[i - 1].padEnd(18)}`));
       return idx > 0 && idx > prev;
     }), lines.slice(1).join(' | '));
-  check('doctor catalog line carries the 0.5.0 core hash', lines.some((l) => l === '  catalog           28 nodes, core f8861576c807e382, no packs'));
+  check('doctor catalog line carries the current core hash', lines.some((l) => l === '  catalog           28 nodes, core 4b1a1732646c0e0d, no packs'));
   check('doctor registry line names the registry URL and its reachability', lines.some((l) => /^ {2}registry {10}https:\/\/models\.xorgate\.io \((index: \d+ models?|unreachable: .+|index\.json: HTTP \d+)\)$/.test(l)), lines.find((l) => l.startsWith('  registry')));
   check('doctor models lines are the explicit root and the cache only (no ./fixtures/models by default)', !lines.some((l) => l.includes('./fixtures/models')) && lines.some((l) => l.startsWith('  models            ') && l.includes('empty-cache')), lines.filter((l) => /^ {2}(models| {6})/.test(l)).join(' | '));
 }
@@ -488,12 +488,12 @@ function serveDir(dir) {
     try { out = JSON.parse(lib.stdout.trim().split('\n').at(-1)); } catch { /* reported below */ }
     check(`packs (${fmt}) library script runs`, lib.status === 0 && out !== null, lib.stderr.trim().split('\n').slice(-3).join(' | '));
     // 0.5.0: the core hash moved on purpose (output.event's webhook field).
-    check(`packs (${fmt}): the core payload is 0.5.0's: f8861576c807e382, 28 nodes, one core pack entry with that hash`,
-      out?.coreVersion === 'f8861576c807e382' && out?.coreNodes === 28 && JSON.stringify(out?.corePacks) === JSON.stringify([{ name: 'core', version: pkgVersion, hash: 'f8861576c807e382' }]), JSON.stringify(out?.corePacks));
+    check(`packs (${fmt}): the core payload is the current one: 4b1a1732646c0e0d, 28 nodes, one core pack entry with that hash`,
+      out?.coreVersion === '4b1a1732646c0e0d' && out?.coreNodes === 28 && JSON.stringify(out?.corePacks) === JSON.stringify([{ name: 'core', version: pkgVersion, hash: '4b1a1732646c0e0d' }]), JSON.stringify(out?.corePacks));
     check(`packs (${fmt}): corePacks are the eight core namespaces in registry order, core/function last`,
       JSON.stringify(out?.corePackNames) === JSON.stringify(['core/source', 'core/connector', 'core/video', 'core/telemetry', 'core/model', 'core/logic', 'core/output', 'core/function']), String(out?.corePackNames));
     check(`packs (${fmt}): with the pack, packs[] has two entries, the core hash is unchanged and catalogVersion differs`,
-      out?.packs?.length === 2 && out.packs[0].name === 'core' && out.packs[0].hash === 'f8861576c807e382' && out.packs[1].name === '@acme/xwe-nodes-scale' && out.packs[1].version === '1.0.0' && /^[0-9a-f]{16}$/.test(out.packs[1].hash) && out.version !== 'f8861576c807e382' && out.nodes === 29 && out.cached === true,
+      out?.packs?.length === 2 && out.packs[0].name === 'core' && out.packs[0].hash === '4b1a1732646c0e0d' && out.packs[1].name === '@acme/xwe-nodes-scale' && out.packs[1].version === '1.0.0' && /^[0-9a-f]{16}$/.test(out.packs[1].hash) && out.version !== '4b1a1732646c0e0d' && out.nodes === 29 && out.cached === true,
       `${JSON.stringify(out?.packs)} catalogVersion=${out?.version}`);
     check(`packs (${fmt}): validateDefinition reports the unknown type against core and passes against the pack catalog; inspectTemplate takes the catalog`,
       out?.validateCore?.includes('UNKNOWN_NODE_TYPE') && out?.validatePack === true && out?.inspectKey === 'telemetry', JSON.stringify([out?.validateCore, out?.validatePack, out?.inspectKey]));
@@ -503,7 +503,7 @@ function serveDir(dir) {
     check(`packs (${fmt}): catalog and packs together is a usage error; a core namespace, a duplicate type and an untagged json output throw naming the node`,
       out?.errors?.both === 'createEngine takes a catalog or packs, not both' && out?.errors?.namespace?.includes('node type "model.scale" uses the core namespace "model"') && out?.errors?.duplicate?.includes('Duplicate catalog node type "acme.scale" (in pack "@acme/xwe-nodes-scale" and pack "y")') && out?.errors?.tag === 'json output "o" on "acme.untagged" must declare a tag', JSON.stringify(out?.errors));
     check(`packs (${fmt}): core minus core/model composes 24 nodes with a different core hash and no detection node`,
-      out?.minusModel?.nodes === 24 && out.minusModel.hasDetection === false && out.minusModel.packs?.length === 1 && out.minusModel.packs[0].name === 'core' && out.minusModel.packs[0].hash !== 'f8861576c807e382', JSON.stringify(out?.minusModel));
+      out?.minusModel?.nodes === 24 && out.minusModel.hasDetection === false && out.minusModel.packs?.length === 1 && out.minusModel.packs[0].name === 'core' && out.minusModel.packs[0].hash !== '4b1a1732646c0e0d', JSON.stringify(out?.minusModel));
   }
 }
 
