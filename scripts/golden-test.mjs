@@ -231,7 +231,7 @@ for (const [fmt, argv, imports] of [
       const prev = i === 0 ? 0 : lines.findIndex((l) => l.startsWith(`  ${all[i - 1].padEnd(18)}`));
       return idx > 0 && idx > prev;
     }), lines.slice(1).join(' | '));
-  check('doctor catalog line carries the current core hash', lines.some((l) => l === '  catalog           28 nodes, core 92697a69913738c4, no packs'));
+  check('doctor catalog line carries the current core hash', lines.some((l) => l === '  catalog           28 nodes, core 51116ae4e9dd8ba4, no packs'));
   check('doctor registry line names the registry URL and its reachability', lines.some((l) => /^ {2}registry {10}https:\/\/models\.xorgate\.io \((index: \d+ models?|unreachable: .+|index\.json: HTTP \d+)\)$/.test(l)), lines.find((l) => l.startsWith('  registry')));
   check('doctor models lines are the explicit root and the cache only (no ./fixtures/models by default)', !lines.some((l) => l.includes('./fixtures/models')) && lines.some((l) => l.startsWith('  models            ') && l.includes('empty-cache')), lines.filter((l) => /^ {2}(models| {6})/.test(l)).join(' | '));
 }
@@ -488,12 +488,12 @@ function serveDir(dir) {
     try { out = JSON.parse(lib.stdout.trim().split('\n').at(-1)); } catch { /* reported below */ }
     check(`packs (${fmt}) library script runs`, lib.status === 0 && out !== null, lib.stderr.trim().split('\n').slice(-3).join(' | '));
     // 0.5.1: the core hash moved on purpose (connector.third_party / logic.comparator fields).
-    check(`packs (${fmt}): the core payload is the current one: 92697a69913738c4, 28 nodes, one core pack entry with that hash`,
-      out?.coreVersion === '92697a69913738c4' && out?.coreNodes === 28 && JSON.stringify(out?.corePacks) === JSON.stringify([{ name: 'core', version: pkgVersion, hash: '92697a69913738c4' }]), JSON.stringify(out?.corePacks));
+    check(`packs (${fmt}): the core payload is the current one: 51116ae4e9dd8ba4, 28 nodes, one core pack entry with that hash`,
+      out?.coreVersion === '51116ae4e9dd8ba4' && out?.coreNodes === 28 && JSON.stringify(out?.corePacks) === JSON.stringify([{ name: 'core', version: pkgVersion, hash: '51116ae4e9dd8ba4' }]), JSON.stringify(out?.corePacks));
     check(`packs (${fmt}): corePacks are the eight core namespaces in registry order, core/function last`,
       JSON.stringify(out?.corePackNames) === JSON.stringify(['core/source', 'core/connector', 'core/video', 'core/telemetry', 'core/model', 'core/logic', 'core/output', 'core/function']), String(out?.corePackNames));
     check(`packs (${fmt}): with the pack, packs[] has two entries, the core hash is unchanged and catalogVersion differs`,
-      out?.packs?.length === 2 && out.packs[0].name === 'core' && out.packs[0].hash === '92697a69913738c4' && out.packs[1].name === '@acme/xwe-nodes-scale' && out.packs[1].version === '1.0.0' && /^[0-9a-f]{16}$/.test(out.packs[1].hash) && out.version !== '92697a69913738c4' && out.nodes === 29 && out.cached === true,
+      out?.packs?.length === 2 && out.packs[0].name === 'core' && out.packs[0].hash === '51116ae4e9dd8ba4' && out.packs[1].name === '@acme/xwe-nodes-scale' && out.packs[1].version === '1.0.0' && /^[0-9a-f]{16}$/.test(out.packs[1].hash) && out.version !== '51116ae4e9dd8ba4' && out.nodes === 29 && out.cached === true,
       `${JSON.stringify(out?.packs)} catalogVersion=${out?.version}`);
     check(`packs (${fmt}): validateDefinition reports the unknown type against core and passes against the pack catalog; inspectTemplate takes the catalog`,
       out?.validateCore?.includes('UNKNOWN_NODE_TYPE') && out?.validatePack === true && out?.inspectKey === 'telemetry', JSON.stringify([out?.validateCore, out?.validatePack, out?.inspectKey]));
@@ -503,7 +503,7 @@ function serveDir(dir) {
     check(`packs (${fmt}): catalog and packs together is a usage error; a core namespace, a duplicate type and an untagged json output throw naming the node`,
       out?.errors?.both === 'createEngine takes a catalog or packs, not both' && out?.errors?.namespace?.includes('node type "model.scale" uses the core namespace "model"') && out?.errors?.duplicate?.includes('Duplicate catalog node type "acme.scale" (in pack "@acme/xwe-nodes-scale" and pack "y")') && out?.errors?.tag === 'json output "o" on "acme.untagged" must declare a tag', JSON.stringify(out?.errors));
     check(`packs (${fmt}): core minus core/model composes 24 nodes with a different core hash and no detection node`,
-      out?.minusModel?.nodes === 24 && out.minusModel.hasDetection === false && out.minusModel.packs?.length === 1 && out.minusModel.packs[0].name === 'core' && out.minusModel.packs[0].hash !== '92697a69913738c4', JSON.stringify(out?.minusModel));
+      out?.minusModel?.nodes === 24 && out.minusModel.hasDetection === false && out.minusModel.packs?.length === 1 && out.minusModel.packs[0].name === 'core' && out.minusModel.packs[0].hash !== '51116ae4e9dd8ba4', JSON.stringify(out?.minusModel));
   }
 }
 
@@ -696,6 +696,63 @@ for (const [fmt, argv, imports] of [
   check('here trace (default batch): the intersection template run succeeds, 15 records from 1 request, all 15 points matched, no event', res.status === 0 && tr?.intersection?.status === 'succeeded' && tr.intersection.records === 15 && tr.intersection.events === 0 && /^15 speed-limit record\(s\) via here \(trace\), 1 lookup\(s\), 15\/15 trace point\(s\) matched in 1 chunk\(s\)$/.test(tr.intersection.roads ?? '') && /^true on 0\/15 samples/.test(tr.intersection.cmp ?? ''), why(tr?.intersection));
   check('here trace (default batch): a 1800-sample drive buffers past the channel capacity without a stall, 2 chunk requests, 1800 records, overspeed against the matched 40', tr?.drive?.status === 'succeeded' && tr.drive.statuses.every((s) => s === 'ok') && tr.drive.records === 1800 && /^1800 speed-limit record\(s\) via here \(trace\), 2 lookup\(s\), 1800\/1800 trace point\(s\) matched in 2 chunk\(s\)$/.test(tr.drive.roads ?? '') && /^true on 1800\/1800 samples/.test(tr.drive.cmp ?? '') && tr.drive.events >= 1 && tr.drive.kinds.join() === 'overspeed', why(tr?.drive));
   check("here trace (contrast): the same drive under channelMode 'bounded' fails as a stall", tr?.bounded?.status === 'failed' && /stall/i.test(tr.bounded.error ?? ''), why(tr?.bounded));
+}
+
+// --- HERE Routing provider (0.5.2) in default batch mode ----------------------
+// fixtures/templates/overspeed-here-routing.json through createEngine +
+// localHost with only httpFetch mocked: the REAL Routing v8 answer captured on
+// the owner's self-serve account (Royal York Rd, 2026-10-23) over the 30-sample
+// drive along it, then the 30-minute drive (1800 samples) answered by a
+// synthetic route through each request's waypoints at 40 km/h.
+{
+  const routeRoot = join(outRoot, 'here-routing');
+  mkdirSync(routeRoot, { recursive: true });
+  const driveCsv = join(routeRoot, 'drive-1800.csv');
+  const t0 = 1792269400000;
+  writeFileSync(driveCsv, 'ts,gps.lat,gps.lon,gps.speed,gps.heading\n' + Array.from({ length: 1800 }, (_, i) => `${t0 + i * 1000},${(43.65 + i * 0.0002).toFixed(6)},-79.500000,60.0,0.0`).join('\n') + '\n');
+  const script = `
+    import { readFileSync } from 'node:fs';
+    import { createEngine } from ${JSON.stringify(join(root, 'dist/esm/index.js'))};
+    import { localHost } from ${JSON.stringify(join(root, 'dist/esm/local/index.js'))};
+    const template = JSON.parse(readFileSync(${JSON.stringify(join(root, 'fixtures/templates/overspeed-here-routing.json'))}, 'utf8'));
+    const recorded = readFileSync(${JSON.stringify(join(root, 'fixtures/connector/here-routes-royal-york.json'))}, 'utf8');
+    const T = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const u = (v) => { let o = ''; while (v >= 32) { o += T[(v % 32) + 32]; v = Math.floor(v / 32); } return o + T[v]; };
+    const sg = (v) => u(v < 0 ? -2 * v - 1 : 2 * v);
+    const encode = (pts) => { let o = u(1) + u(6), pl = 0, pn = 0; for (const p of pts) { const a = Math.round(p[0] * 1e6), b = Math.round(p[1] * 1e6); o += sg(a - pl) + sg(b - pn); pl = a; pn = b; } return o; };
+    const urls = [];
+    // A route through the request's waypoints, one 40 km/h span.
+    const synthetic = async (url) => {
+      urls.push(String(url));
+      const q = String(url).split('?')[1].split('&');
+      // origin, the vias, destination: the order buildHereRoutingRequest writes them.
+      const pts = q.filter((x) => /^(origin|via|destination)=/.test(x)).map((x) => x.split('=')[1].split('!')[0].split(',').map(Number));
+      return new Response(JSON.stringify({ routes: [{ sections: [{ polyline: encode(pts), spans: [{ offset: 0, speedLimit: 40 / 3.6, names: [{ value: 'Golden Ave' }], topologySegmentId: '+here:cm:segment:1' }] }] }] }), { status: 200 });
+    };
+    const runs = {
+      royalYork: { csv: ${JSON.stringify(join(root, 'fixtures/telemetry/royal-york-drive.csv'))}, http: async (url) => { urls.push(String(url)); return new Response(recorded, { status: 200 }); }, template },
+      // Paced at 100/s instead of the default 5/s so 38 requests take well under a second.
+      drive: { csv: ${JSON.stringify(driveCsv)}, http: synthetic, template: { ...template, nodes: template.nodes.map((n) => (n.id === 'roads' ? { ...n, data: { ...n.data, config: { ...n.data.config, maxRequestsPerSecond: 100 } } } : n)) } },
+    };
+    const results = {};
+    for (const [name, r] of Object.entries(runs)) {
+      urls.length = 0;
+      const local = localHost({ outDir: ${JSON.stringify(routeRoot)}, baseDir: ${JSON.stringify(root)} });
+      const host = { bind: async (a) => ({ ...(await local.bind(a)), httpFetch: r.http }) };
+      const started = Date.now();
+      const run = await createEngine({ host }).run({ template: r.template, inputs: { telemetry: r.csv }, runId: 'golden-here-routing-' + name });
+      const step = (id) => run.result.steps.find((s) => s.nodeId === id);
+      results[name] = { status: run.result.status, error: run.result.error, roads: step('roads')?.output, statuses: run.result.steps.map((s) => s.status), records: run.result.artifacts.outputs.cap?.count ?? 0, events: run.result.events.length, kinds: [...new Set(run.result.events.map((e) => e.kind))], requests: urls.length, keyInUrl: urls.every((x) => x.endsWith('apikey=hk-golden-routing-0123456789')), ms: Date.now() - started };
+    }
+    console.log('RESULT ' + JSON.stringify(results));
+  `;
+  const res = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: root, encoding: 'utf8', env: { ...process.env, XORGATE_SECRET_HERE_API_KEY: 'hk-golden-routing-0123456789' } });
+  let tr = null;
+  try { tr = JSON.parse(res.stdout.split('\n').find((l) => l.startsWith('RESULT ')).slice(7)); } catch { /* reported below */ }
+  const why = (r) => (r ? JSON.stringify(r) : res.stderr.trim().split('\n').slice(-3).join(' | '));
+  console.log(`     (here_routing wall time: royal york ${tr?.royalYork?.ms} ms, drive ${tr?.drive?.ms} ms)`);
+  check('here_routing (default batch, real Routing v8 answer): Royal York template run succeeds, 1 request with the here-api-key secret, 30 records (21 at 50, 9 null-limit), one overspeed event', res.status === 0 && tr?.royalYork?.status === 'succeeded' && tr.royalYork.requests === 1 && tr.royalYork.keyInUrl && tr.royalYork.records === 30 && tr.royalYork.events === 1 && tr.royalYork.kinds.join() === 'overspeed' && /^21 speed-limit record\(s\) via here_routing \(trace\), 1 lookup\(s\), 9 null record\(s\), 9 without coverage, 30 sample\(s\) matched, 0 unmatched, 9 with a null limit, 1 chunk\(s\)$/.test(tr.royalYork.roads ?? ''), why(tr?.royalYork));
+  check('here_routing (default batch): an 1800-sample drive (22 m spacing) takes 38 route requests of <= 50 waypoints, 1800 matched records, overspeed against the routed 40', tr?.drive?.status === 'succeeded' && tr.drive.statuses.every((s) => s === 'ok') && tr.drive.requests === 38 && tr.drive.records === 1800 && /^1800 speed-limit record\(s\) via here_routing \(trace\), 38 lookup\(s\), 1800 sample\(s\) matched, 0 unmatched, 0 with a null limit, 38 chunk\(s\)$/.test(tr.drive.roads ?? '') && tr.drive.events >= 1 && tr.drive.kinds.join() === 'overspeed', why(tr?.drive));
 }
 
 // --- --log-level on the CLI and createEngine({ log }) in the library ------------

@@ -170,11 +170,15 @@ check(
   // overlay, model.depth's distanceScale and proximity_gate's maxDistanceM (2b2a3c052696cf1e);
   // 0.5.0 added output.event's `webhook` (f8861576c807e382); 0.5.1: connector.third_party's
   // rate policy / no-answer / trace fields and logic.comparator's maxReferenceAgeMs /
-  // fallbackReference (current hash below). Without core/function the 26 older defs hash to the
-  // second value below (0.5.0: 184300277358e824; 0.4.0: ab458ea46642308b; 0.1.0-0.3.0: e481243f5ffe4678).
-  check('catalogVersion is the current core hash 92697a69913738c4', payload.catalogVersion === '92697a69913738c4', payload.catalogVersion);
+  // fallbackReference (92697a69913738c4); 0.5.2: connector.third_party's here_routing provider,
+  // traceMatchRadiusM and provider-dependent trace defaults (current hash below). Without
+  // core/function the 26 older defs hash to the second value below (0.5.1: 22138d958ba19520;
+  // 0.5.0: 184300277358e824; 0.4.0: ab458ea46642308b; 0.1.0-0.3.0: e481243f5ffe4678).
+  check('catalogVersion is the current core hash 51116ae4e9dd8ba4', payload.catalogVersion === '51116ae4e9dd8ba4', payload.catalogVersion);
   const withoutFunctions = cjsRoot.buildCatalogPayload(cjsRoot.createCatalog(cjsRoot.corePacks.filter((p) => p.name !== 'core/function')));
-  check('without core/function the 26 non-function defs hash to 22138d958ba19520', withoutFunctions.nodes.length === 26 && withoutFunctions.catalogVersion === '22138d958ba19520', withoutFunctions.catalogVersion);
+  check('without core/function the 26 non-function defs hash to d55afc8c80c2a44f', withoutFunctions.nodes.length === 26 && withoutFunctions.catalogVersion === 'd55afc8c80c2a44f', withoutFunctions.catalogVersion);
+  const roads = payload.nodes.find((n) => n.type === 'connector.third_party');
+  check('connector.third_party offers provider here_routing and traceMatchRadiusM (default 50); trace chunk/overlap/spacing defaults are per provider (0.5.2)', roads?.configSchema?.properties?.provider?.enum?.join(',') === 'google_roads,here,here_routing,osm' && roads.configDefaults?.traceMatchRadiusM === 50 && ['traceChunkPoints', 'traceOverlapPoints', 'traceMinSpacingM'].every((k) => roads.configDefaults?.[k] === undefined && roads.configSchema.properties[k] !== undefined), JSON.stringify(roads?.configSchema?.properties?.provider));
   const oe = payload.nodes.find((n) => n.type === 'output.event');
   check('output.event config gains an optional flat string `webhook` (0.5.0)', oe?.configSchema?.properties?.webhook?.type === 'string' && !(oe.configSchema.required ?? []).includes('webhook') && oe.configDefaults?.webhook === undefined, JSON.stringify(oe?.configSchema?.properties?.webhook));
   // 0.4.0 metric depth: the pure helpers behind distanceM and the distance label.
@@ -255,6 +259,8 @@ check(
   check('captureFormatsOf (root and ./local are the same function) maps each data_capture node to jsonl unless json is configured', cjsRoot.captureFormatsOf === cjsLocal.captureFormatsOf && JSON.stringify(cjsRoot.captureFormatsOf(def)) === JSON.stringify({ a: 'json', b: 'jsonl' }));
   const here = cjsRoot.buildHereRequest(43.6, -79.5, 'KEY');
   const overpass = cjsRoot.buildOverpassRequest(43.6, -79.5);
+  const routing = cjsRoot.buildHereRoutingRequest([{ lat: 43.6, lng: -79.5 }, { lat: 43.61, lng: -79.5 }, { lat: 43.62, lng: -79.5 }], 'KEY');
+  check('here_routing helpers from the root: buildHereRoutingRequest (GET /v8/routes, pass-through via), decodeFlexiblePolyline, parseHereRoutingResponse, matchToRoute', routing.url === 'https://router.hereapi.com/v8/routes?transportMode=car&routingMode=fast&departureTime=any&origin=43.600000,-79.500000&via=43.610000,-79.500000!passThrough=true&destination=43.620000,-79.500000&return=polyline&spans=speedLimit,names,length,segmentId&apikey=KEY' && routing.init.method === 'GET' && cjsRoot.decodeFlexiblePolyline('BFoz5xJ67i1B1B7PzIhaxL7Y').length === 4 && cjsRoot.parseHereRoutingResponse({}).length === 0 && cjsRoot.matchToRoute(43.6, -79.5, [], 50).matched === false, routing.url);
   check('connector request builders: Google Roads URL carries the rounded position and the key; HERE and Overpass return { url, init }', cjsRoot.buildGoogleRoadsUrl(43.6, -79.5, 'K') === 'https://roads.googleapis.com/v1/speedLimits?path=43.6000%2C-79.5000&units=KPH&key=K' && here.url.startsWith('https://routematching.hereapi.com/v8/match/routelinks?') && here.url.includes('apikey=KEY') && typeof here.init === 'object' && overpass.url === 'https://overpass-api.de/api/interpreter' && overpass.init.headers['User-Agent'].startsWith('xorgate-workflows/2'));
   check('connector response parsers: Roads, HERE and Overpass answers reduce to { speedLimitKph, placeId? }; parseMaxspeedTag reads km/h and mph', JSON.stringify(cjsRoot.parseGoogleRoadsResponse({ speedLimits: [{ placeId: 'p', speedLimit: 50, units: 'KPH' }] })) === JSON.stringify({ speedLimitKph: 50, placeId: 'p' }) && cjsRoot.parseOverpassResponse({ elements: [{ tags: { maxspeed: '30 mph' } }] }).speedLimitKph === 48 && cjsRoot.parseHereResponse({}).speedLimitKph === null && cjsRoot.parseMaxspeedTag('60') === 60 && cjsRoot.parseMaxspeedTag('nope') === null);
   check('dist/cjs/engine and dist/esm/engine no longer ship session.js or finalize.js (moved to the platform shell)', ['cjs', 'esm'].every((f) => !existsSync(join(root, `dist/${f}/engine/session.js`)) && !existsSync(join(root, `dist/${f}/engine/finalize.js`))));

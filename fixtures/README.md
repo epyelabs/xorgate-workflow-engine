@@ -59,6 +59,7 @@ Published schemaVersion-2 definitions, verbatim from the dev DB
 | `overspeed-webhook.json` | hand-made from `overspeed.json` (0.5.0) | n/a | The local webhook case: `overspeed.json` with `webhook: "dispatch"` on n4 and a second `output.event` n5 (`overspeed_audit`, `webhook: "audit"`) on the same condition. Hermetic; the golden suite binds `dispatch` to a loopback listener and leaves `audit` unbound. |
 | `overspeed-osm.json` | "Overspeed via OSM (scenario 2c demo)" `4daaeb95-e50b-4649-9dab-0fa2d8df7af2` | published v1 | The connector case. NOT for the golden test: it calls public Overpass at run time (real intermittent 429s, see workflow_refactor M7 notes). Kept for manual connector testing. |
 | `overspeed-osm-fallback.json` | hand-made from the Alocate production overspeed graph (`alocate/plans/driver-behaviour/scripts/templates/overspeed-obd.json`, 2026-10) | n/a | The no-answer / fallback case: `source.telemetry` (obd.speed, gps.lat/lon) → `telemetry.resample` (10 s hold) → `connector.third_party` (OSM, `emitNoAnswer`, `onLookupError: skip`) → `logic.comparator` (speed > limit + 5, `fallbackReference` 50, `maxReferenceAgeMs` 5000) → `logic.debounce` 10 s → `output.event`; webhook removed. Run by `test/connector/connector-test.mjs` with Overpass mocked. |
+| `overspeed-here-routing.json` | hand-made (2026-10) | n/a | `overspeed-here-trace.json` with `provider: here_routing` (HERE Routing v8, self-serve plans). Run by `test/connector/connector-test.mjs` and by the golden suite (default batch mode) over `telemetry/royal-york-drive.csv` with the real Routing answer below, plus a generated 1800-sample drive with a synthetic route. |
 | `overspeed-here-trace.json` | hand-made (2026-10) | n/a | HERE trace mode: `source.telemetry` (gps.speed/lat/lon/heading) → `connector.third_party` (`lookupMode: trace`, `onLookupError: skip`) → `logic.comparator` reference, with the source also on the comparator's signal (1 Hz, no resample; `fallbackReference` 50) → `logic.debounce` 10 s → `output.event`. Needs elastic batch channels (the default since 0.5.1; under `channelMode: 'bounded'` a large `channelCapacity`); run by `test/connector/connector-test.mjs` and by the golden suite (default batch mode, the intersection trace plus a generated 1800-sample drive) with HERE mocked. |
 
 Grab command (per template id/version):
@@ -176,3 +177,15 @@ deleted on 2026-09-04 rather than added to `fixtures.json`.
   not its `FROM_REF` 30). Built from HERE's documented OpenAPI schema
   (TracePoint / Link fields), not captured from a live call: replace it with a
   real capture when one is made with the owner's key.
+- `connector/here-routes-royal-york.json`: a REAL HERE Routing API v8 answer,
+  captured 2026-10-23 on the owner's self-serve account (`GET
+  https://router.hereapi.com/v8/routes?transportMode=car&origin=43.6918,-79.5309&via=43.6945,-79.5312&via=43.6968,-79.5336&destination=43.6990,-79.5360&return=polyline,summary&spans=speedLimit,names,length,segmentId`,
+  key not recorded). Stopover vias, so three sections: Royal York Rd spans at
+  13.8888893 m/s (50 km/h), a Yorkleigh Ave in-and-out, and unnamed spans
+  without `speedLimit` (the end of section 2 and all of section 3). Spans
+  carry `topologySegmentId` (no `segmentId`) on this plan.
+- `telemetry/royal-york-drive.csv`: 30 samples, 3 s apart, along that route's
+  decoded polyline (the Yorkleigh in-and-out and the loop to the third
+  waypoint skipped) with up to 3 m of lateral jitter: 21 on Royal York Rd
+  (64 km/h for samples 3-8, else 46), 9 on the unnamed road. Generated from
+  the fixture, not driven.
