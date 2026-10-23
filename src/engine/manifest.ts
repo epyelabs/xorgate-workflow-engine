@@ -86,7 +86,7 @@ export const engineStepSchema = z.object({
   seq: z.number().int().min(0),
   nodeId: z.string(),
   label: z.string(),
-  status: z.enum(['ok', 'failed', 'skipped']),
+  status: z.enum(['ok', 'failed', 'skipped', 'cancelled']), // cancelled: 0.5.1
   output: z.string().default(''),
   durationMs: z.number().min(0).default(0),
 });

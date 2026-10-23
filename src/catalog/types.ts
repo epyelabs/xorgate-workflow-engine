@@ -429,7 +429,8 @@ export interface EngineProgressStep {
   seq: number;
   nodeId: string;
   label: string;
-  status: 'ok' | 'failed' | 'skipped';
+  /** `cancelled` (0.5.1): stopped by the run deadline or the stall detector while it ran. */
+  status: 'ok' | 'failed' | 'skipped' | 'cancelled';
   output: string;
   durationMs: number;
 }

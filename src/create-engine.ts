@@ -88,6 +88,18 @@ export interface EngineRunOptions {
   /** Wall-clock budget; on expiry everything is cancelled and the run fails. */
   deadlineMs?: number;
   /**
+   * Channel policy for batch and simulation runs (0.5.1): `elastic` (default)
+   * makes every non-frames/video edge unbounded; `bounded` blocks every edge
+   * at the channel capacity (the pre-0.5.1 behaviour). See `EngineRunDeps`.
+   */
+  channelMode?: 'elastic' | 'bounded';
+  /**
+   * Stall detector window in ms (0.5.1, default 30000, 0 disables): a run
+   * whose running nodes are all parked on channels with no progress for this
+   * long fails with `Graph stalled: ...`.
+   */
+  stallMs?: number;
+  /**
    * Local webhook delivery (0.5.0): binds the `webhook` names on the graph's
    * `output.event` nodes to URLs (and optional `whsec_` signing secrets).
    * `XWE_WEBHOOK_<NAME>` / `XWE_WEBHOOK_SECRET_<NAME>` in `env` (default
@@ -382,6 +394,8 @@ export function createEngine(options: CreateEngineOptions): Engine {
             ...(bound.httpFetch ? { httpFetch: bound.httpFetch } : {}),
             ...(progress ? { progress } : {}),
             ...(deadlineMs ? { deadlineMs } : {}),
+            ...(runOptions.channelMode ? { channelMode: runOptions.channelMode } : {}),
+            ...(runOptions.stallMs !== undefined ? { stallMs: runOptions.stallMs } : {}),
             ...(webhookSink && webhookSink.secrets.length > 0 ? { redact: webhookSink.secrets } : {}),
             log: logger.sink,
             catalog,

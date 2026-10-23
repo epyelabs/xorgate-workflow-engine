@@ -63,7 +63,7 @@ export const simStepPayloadSchema = isoAt.extend({
     seq: z.number().int().min(0),
     nodeId: z.string().min(1),
     label: z.string(),
-    status: z.enum(['ok', 'failed', 'skipped']),
+    status: z.enum(['ok', 'failed', 'skipped', 'cancelled']), // cancelled: 0.5.1
     output: z.string(),
     durationMs: z.number().min(0),
   }),

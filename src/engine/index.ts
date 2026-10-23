@@ -16,15 +16,30 @@ import type {
 } from '../catalog/types';
 import { resolvePort } from '../validate';
 import { BoundedChannel } from './channel';
+import type { ChannelPolicy } from './channel';
 import type { MessageLevel } from './log';
 import { createRedactor } from './redact';
 
 /**
  * The streaming graph engine core (architecture.md §4.1). One process per run:
- * every node's executor starts concurrently, edges are bounded in-process
- * channels (default depth 32), and a batch source therefore reads no faster
- * than its slowest consumer. In live mode, frames channels switch to
- * drop-oldest (latest wins) while telemetry/condition channels keep blocking.
+ * every node's executor starts concurrently and every edge is an in-process
+ * channel. The channel policy depends on the run mode and the edge's channel:
+ *
+ * - `live`: frames edges drop oldest (latest wins), every other edge blocks
+ *   at `channelCapacity` (default 32).
+ * - `batch` / `simulation` (0.5.1, `channelMode: 'elastic'`, the default):
+ *   `frames` and `video` edges block at `channelCapacity`; every other edge is
+ *   unbounded, so a producer never waits on a consumer. The source already
+ *   holds its whole window in memory, so bounding those edges only paced the
+ *   graph, and it deadlocked fan-out graphs whose merge waited on a silent
+ *   branch (a connector with no answer, a lookup cap).
+ * - `channelMode: 'bounded'` restores the pre-0.5.1 batch behaviour (every
+ *   non-live edge blocks), for backpressure tests.
+ *
+ * A stall detector (`stallMs`, default 30 s) fails a run whose running nodes
+ * are all parked on channel operations with no progress for that long, and
+ * names who waits on whom. A deadline or a stall marks still-running nodes
+ * `cancelled` (with the reason) rather than `skipped`.
  *
  * Storage-free by design: sources read through the EngineSourceReader seam,
  * outputs collect through ctx callbacks, and the deploy target (Lambda handler,
@@ -36,6 +51,22 @@ import { createRedactor } from './redact';
  */
 
 export const DEFAULT_CHANNEL_CAPACITY = 32;
+/** No channel progress for this long, with every running node parked on a channel, fails the run. */
+export const DEFAULT_STALL_MS = 30_000;
+/** How often the stall detector samples the graph (shorter when `stallMs` is shorter). */
+export const STALL_CHECK_INTERVAL_MS = 2_000;
+
+/** Per-edge channel statistics, reported in the debug log and on the in-memory outcome. */
+export interface EngineChannelStat {
+  edgeId: string;
+  source: string;
+  target: string;
+  channel: string;
+  policy: ChannelPolicy;
+  /** Infinity for `unbounded` edges. */
+  capacity: number;
+  maxDepth: number;
+}
 
 export interface EngineGraphSpec {
   runId: string;
@@ -62,7 +93,22 @@ export interface EngineRunDeps {
    * transport (IoT topics) and run-status transitions.
    */
   progress?: EngineProgressSink;
+  /** Capacity of every bounded channel (default 32). */
   channelCapacity?: number;
+  /**
+   * Channel policy for `batch` and `simulation` runs (0.5.1). `elastic`
+   * (default): non-frames/video edges are unbounded, frames and video edges
+   * block at `channelCapacity`. `bounded`: every edge blocks at
+   * `channelCapacity`, the pre-0.5.1 behaviour. `live` runs ignore it.
+   */
+  channelMode?: 'elastic' | 'bounded';
+  /**
+   * Stall detector (0.5.1): when no channel has moved for this long and every
+   * still-running node is parked on a channel (taking from an empty one or
+   * pushing to a full one), the run fails with an error naming the waits.
+   * Default 30000; 0 disables it.
+   */
+  stallMs?: number;
   /** Wall-clock budget; on expiry everything is cancelled and the run fails. */
   deadlineMs?: number;
   /**
@@ -85,7 +131,8 @@ export interface EngineStep {
   seq: number;
   nodeId: string;
   label: string;
-  status: 'ok' | 'failed' | 'skipped';
+  /** `cancelled` (0.5.1): still running when the deadline or the stall detector stopped the run. */
+  status: 'ok' | 'failed' | 'skipped' | 'cancelled';
   output: string;
   durationMs: number;
 }
@@ -99,11 +146,18 @@ export interface EngineRunOutcome {
   /** nodeId -> records collected via ctx.captureRecord (output.data_capture). */
   captures: Record<string, unknown[]>;
   metrics: { nodes: number; okSteps: number; events: number; messages: number };
+  /**
+   * Per-edge channel statistics (0.5.1). In memory only: `result.json` does
+   * not carry them (buildEngineResult picks its fields).
+   */
+  channels?: EngineChannelStat[];
 }
 
 interface NodeState {
-  status: 'running' | 'ok' | 'failed' | 'skipped';
+  status: 'running' | 'ok' | 'failed' | 'skipped' | 'cancelled';
   aborted: boolean;
+  /** Set when the deadline or the stall detector stopped this node while it ran. */
+  cancelReason: string | null;
   error: string | null;
   summary: string | null;
   emitted: number;
@@ -171,6 +225,8 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
   const secrets = deps.secrets ? redactor.wrapSecrets(deps.secrets) : undefined;
   const progress = deps.progress ? redactor.wrapProgress(deps.progress) : undefined;
   const capacity = deps.channelCapacity ?? DEFAULT_CHANNEL_CAPACITY;
+  const channelMode = deps.channelMode ?? 'elastic';
+  const stallMs = deps.stallMs ?? DEFAULT_STALL_MS;
   const catalog = deps.catalog ?? coreCatalog;
 
   // Pre-flight structural guards (published definitions already pass these;
@@ -188,7 +244,21 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
   const nodesById = new Map(def.nodes.map((n) => [n.id, n]));
   const orderIndex = new Map(order.map((id, i) => [id, i]));
 
-  // Wire one bounded channel per edge. Live-mode frames edges drop oldest.
+  // Wire one channel per edge; the policy follows the mode and channel type
+  // (see the module comment).
+  const policyFor = (channelType: string): ChannelPolicy => {
+    if (spec.mode === 'live') return channelType === 'frames' ? 'drop-oldest' : 'block';
+    if (channelMode === 'bounded') return 'block';
+    return channelType === 'frames' || channelType === 'video' ? 'block' : 'unbounded';
+  };
+  const edgeChannels: Array<{
+    edgeId: string;
+    source: string;
+    target: string;
+    targetPort: string;
+    channelType: string;
+    channel: BoundedChannel<EngineMessage>;
+  }> = [];
   const inChannelsByNode = new Map<string, Array<EngineInChannel & { channel: BoundedChannel<EngineMessage> }>>();
   const outChannelsByNode = new Map<string, Map<string, BoundedChannel<EngineMessage>[]>>();
   for (const node of def.nodes) {
@@ -209,8 +279,16 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
     if (!inp.port) {
       return failedOutcome(spec, edge.target, `Edge "${edge.id}": cannot resolve target port`);
     }
-    const policy = spec.mode === 'live' && out.port.channel === 'frames' ? 'drop-oldest' : 'block';
-    const channel = new BoundedChannel<EngineMessage>(capacity, policy);
+    const policy = policyFor(out.port.channel);
+    const channel = new BoundedChannel<EngineMessage>(policy === 'unbounded' ? Infinity : capacity, policy);
+    edgeChannels.push({
+      edgeId: edge.id,
+      source: edge.source,
+      target: edge.target,
+      targetPort: inp.port.id,
+      channelType: out.port.channel,
+      channel,
+    });
     const outs = outChannelsByNode.get(edge.source)!;
     (outs.get(out.port.id) ?? outs.set(out.port.id, []).get(out.port.id)!).push(channel);
     inChannelsByNode.get(edge.target)!.push({
@@ -224,7 +302,7 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
   const states = new Map<string, NodeState>(
     def.nodes.map((n) => [
       n.id,
-      { status: 'running', aborted: false, error: null, summary: null, emitted: 0, durationMs: 0 },
+      { status: 'running', aborted: false, cancelReason: null, error: null, summary: null, emitted: 0, durationMs: 0 },
     ]),
   );
   const events: EngineEventRecord[] = [];
@@ -232,6 +310,19 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
   let messagesTotal = 0;
   let firstFailure: { nodeId: string; error: string } | null = null;
   let timedOut = false;
+  let stalledError: string | null = null;
+  if (edgeChannels.length > 0) {
+    const counts = new Map<string, number>();
+    for (const e of edgeChannels) {
+      const key = e.channel.policy === 'unbounded' ? 'unbounded' : `${e.channel.policy}@${capacity}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    log(
+      `channels (${spec.mode}${spec.mode === 'live' ? '' : `, ${channelMode}`}): ` +
+        [...counts].map(([k, n]) => `${n} ${k}`).join(', '),
+      'debug',
+    );
+  }
 
   // One step row per node, used both for live progress (on node completion)
   // and the final outcome, so the two can never disagree.
@@ -244,7 +335,10 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
         ? state.error ?? 'failed'
         : status === 'skipped'
           ? 'skipped (upstream failure)'
-          : state.summary ?? `${state.emitted} message(s)`;
+          : status === 'cancelled'
+            ? `cancelled: ${state.cancelReason ?? 'run stopped'}` +
+              (state.emitted > 0 ? ` (after ${state.emitted} message(s))` : '')
+            : state.summary ?? `${state.emitted} message(s)`;
     return {
       seq: orderIndex.get(nodeId) ?? 0,
       nodeId,
@@ -372,9 +466,11 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
         messagesTotal += 1;
         await routeMessage(nodeId, typeDef, msg);
       }
-      state.status = state.aborted ? 'skipped' : 'ok';
+      state.status = state.cancelReason !== null ? 'cancelled' : state.aborted ? 'skipped' : 'ok';
     } catch (err) {
-      if (state.aborted) {
+      if (state.cancelReason !== null) {
+        state.status = 'cancelled';
+      } else if (state.aborted) {
         state.status = 'skipped';
       } else {
         state.status = 'failed';
@@ -395,36 +491,130 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
     }
   };
 
+  // Wait state, read off the channels: a node parked in take() on an empty
+  // channel waits on that edge's producer; a node parked in push() on a full
+  // channel is blocked on that edge's consumer. A running node with neither
+  // is busy in its own await (I/O, a model, a child process, a timer).
+  // Each entry is the wait without its subject ("waiting on roads (0 queued)").
+  const waitsByNode = (): Map<string, string[]> => {
+    const waits = new Map<string, string[]>();
+    const add = (nodeId: string, text: string): void => {
+      (waits.get(nodeId) ?? waits.set(nodeId, []).get(nodeId)!).push(text);
+    };
+    for (const e of edgeChannels) {
+      const c = e.channel;
+      if (c.isClosed) continue;
+      // Name the port only when the target has several edges from this source.
+      const twin = edgeChannels.some((o) => o !== e && o.source === e.source && o.target === e.target);
+      const from = twin ? `${e.source} (into ${e.targetPort})` : e.source;
+      if (c.waitingTakers > 0) add(e.target, `waiting on ${from} (${c.depth} queued)`);
+      if (c.waitingPutters > 0) {
+        const cap = c.policy === 'unbounded' ? '' : `/${c.capacity}`;
+        add(e.source, `blocked pushing to ${e.target} (${c.depth}${cap})`);
+      }
+    }
+    return waits;
+  };
+
+  // Stop every still-running node: the deadline and the stall detector share
+  // this. Nodes already skipped by an upstream failure stay skipped.
+  const stopAll = (reasonFor: (nodeId: string, waits: string[] | undefined) => string): void => {
+    const waits = waitsByNode();
+    for (const node of def.nodes) {
+      const state = states.get(node.id)!;
+      if (state.status === 'running' && !state.aborted) {
+        state.cancelReason = reasonFor(node.id, waits.get(node.id));
+        state.aborted = true;
+      }
+    }
+    for (const node of def.nodes) cancelNodeChannels(node.id);
+  };
+
   let deadlineTimer: NodeJS.Timeout | undefined;
   if (deps.deadlineMs !== undefined) {
     deadlineTimer = setTimeout(() => {
+      if (stalledError !== null) return;
       timedOut = true;
-      for (const node of def.nodes) {
-        const state = states.get(node.id)!;
-        if (state.status === 'running') state.aborted = true;
-        cancelNodeChannels(node.id);
-      }
+      stopAll(
+        (_id, waits) =>
+          `run exceeded its max runtime (${deps.deadlineMs} ms) while ${waits ? waits.join('; ') : 'busy'}`,
+      );
       log(`deadline of ${deps.deadlineMs}ms exceeded; cancelling all nodes`);
     }, deps.deadlineMs);
+  }
+
+  // The stall detector: sample every few seconds; progress is any channel
+  // operation, routed message, or node completion.
+  let stallTimer: NodeJS.Timeout | undefined;
+  if (stallMs > 0 && Number.isFinite(stallMs)) {
+    let lastMark = -1;
+    let lastProgressAt = Date.now();
+    const checkEvery = Math.min(STALL_CHECK_INTERVAL_MS, Math.max(10, Math.floor(stallMs / 4)));
+    // Deliberately not unref'd: a graph parked on promises alone would let
+    // the process exit with no result; the detector keeps it alive to fail it.
+    stallTimer = setInterval(() => {
+      if (timedOut || stalledError !== null) return;
+      let mark = messagesTotal;
+      for (const e of edgeChannels) mark += e.channel.ops;
+      for (const st of states.values()) if (st.status !== 'running') mark += 1;
+      const now = Date.now();
+      if (mark !== lastMark) {
+        lastMark = mark;
+        lastProgressAt = now;
+        return;
+      }
+      if (now - lastProgressAt < stallMs) return;
+      const running = order.filter((id) => {
+        const st = states.get(id)!;
+        return st.status === 'running' && !st.aborted;
+      });
+      if (running.length === 0) return;
+      const waits = waitsByNode();
+      if (!running.every((id) => (waits.get(id)?.length ?? 0) > 0)) return;
+      const described = running.flatMap((id) => waits.get(id)!.map((w) => `${id} ${w}`));
+      stalledError = `Graph stalled: ${described.join('; ')} (no progress for ${Math.round((now - lastProgressAt) / 1000)} s)`;
+      log(stalledError);
+      stopAll((_id, own) => `graph stalled while ${(own ?? ['busy']).join('; ')}`);
+    }, checkEvery);
   }
 
   try {
     await Promise.all(def.nodes.map((n) => runNode(n.id)));
   } finally {
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    if (stallTimer !== undefined) clearInterval(stallTimer);
+  }
+
+  const channelStats: EngineChannelStat[] = edgeChannels.map((e) => ({
+    edgeId: e.edgeId,
+    source: e.source,
+    target: e.target,
+    channel: e.channelType,
+    policy: e.channel.policy,
+    capacity: e.channel.capacity,
+    maxDepth: e.channel.maxDepth,
+  }));
+  for (const c of channelStats) {
+    log(
+      `channel ${c.edgeId} ${c.source} -> ${c.target} (${c.channel}, ${c.policy}${c.policy === 'unbounded' ? '' : `@${c.capacity}`}): maxDepth ${c.maxDepth}`,
+      'debug',
+    );
   }
 
   const steps: EngineStep[] = order.map((nodeId) => stepFor(nodeId));
 
   const okSteps = steps.filter((s) => s.status === 'ok').length;
   const failed = firstFailure as { nodeId: string; error: string } | null;
-  return redactor.deep({
-    status: failed || timedOut ? 'failed' : 'succeeded',
-    error: failed ? failed.error : timedOut ? 'Run exceeded its max runtime' : null,
+  const outcome: EngineRunOutcome = redactor.deep({
+    status: failed || timedOut || stalledError !== null ? 'failed' : 'succeeded',
+    error: failed ? failed.error : stalledError ?? (timedOut ? 'Run exceeded its max runtime' : null),
     failedNodeId: failed ? failed.nodeId : null,
     steps,
     events,
     captures,
     metrics: { nodes: def.nodes.length, okSteps, events: events.length, messages: messagesTotal },
   });
+  // Numbers only (Infinity survives); kept out of the redactor's deep copy.
+  outcome.channels = channelStats;
+  return outcome;
 }

@@ -4,6 +4,72 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
+## Unreleased
+
+### Runtime
+
+Elastic channels and a stall detector (plan `workflow-engine-improvements`
+P0.1 + P0.2). The core `catalogVersion` does not move
+(`f8861576c807e382`): no node definition changed.
+
+- **Elastic channels in `batch` and `simulation` runs.** Every edge whose
+  channel is not `frames` or `video` is now unbounded (new `ChannelPolicy`
+  `'unbounded'`: push always buffers and never waits). `frames` and `video`
+  edges still block at the channel capacity (default 32), and `live` runs
+  are unchanged (frames drop oldest, every other edge blocks at 32). This
+  removes the fan-out + `mergeByTs` deadlock: a branch that goes quiet (a
+  connector with no answer, a lookup cap, samples without a position) no
+  longer parks its producer until the run deadline. The source already holds
+  its whole window in memory, so unbounded edges hold at most what their
+  producer emits.
+- `EngineRunDeps.channelMode` / `engine.run({ channelMode })`:
+  `'elastic'` (default) or `'bounded'` (every non-live edge blocks at
+  `channelCapacity`, the 0.5.0 behaviour; for backpressure tests).
+- **Stall detector.** `EngineRunDeps.stallMs` / `engine.run({ stallMs })`
+  (default 30000, `0` disables). Sampled every 2 s (every `stallMs / 4` when
+  shorter): when no channel has moved for `stallMs` and every still-running
+  node is parked on a channel (taking from an empty one, or pushing to a full
+  one), the run fails with an error naming the waits, for example (abridged)
+  `Graph stalled: rs blocked pushing to cmp (32/32); roads waiting on rs (0 queued); cmp waiting on roads (0 queued) (no progress for 30 s)`.
+  A node busy in its own await (HTTP, a model, a child process, a timer) is
+  never a stall. `failedNodeId` is `null`, like a deadline. Detection lands
+  between `stallMs` and `stallMs` plus two check intervals. A local `xwe run`
+  of a stalled graph now fails with `result.json` instead of exiting with
+  none.
+- **New step status `cancelled`.** On a deadline or a stall, nodes still
+  running are reported `cancelled`, with output
+  `cancelled: run exceeded its max runtime (<n> ms) while <wait>` or
+  `cancelled: graph stalled while <wait>` (`<wait>` is
+  `waiting on <node> (<n> queued)`, `blocked pushing to <node> (<n>/<cap>)`
+  or `busy`), instead of `skipped (upstream failure)`. Nodes skipped by an
+  upstream failure stay `skipped`. The run-level `error` for a deadline is
+  unchanged (`Run exceeded its max runtime`).
+- **Schema change consumers must accept (release core first or alongside):**
+  the step `status` enum gains `'cancelled'` in `engineStepSchema`
+  (`result.json` `steps[].status`), in `simStepPayloadSchema`
+  (`steps` progress messages, NDJSON `--progress json` and the IoT `steps`
+  topic) and in the `EngineStep` / `EngineProgressStep` types. A reader with
+  the 0.5.0 enum (core's finalize zod) rejects a `result.json` that carries
+  it. Nothing else in `result.json` changes: no new keys, `metrics` is still
+  `{ nodes, okSteps, events, messages }`.
+- Diagnostics: the debug log names the channel policy
+  (`channels (batch, elastic): 7 unbounded`) and, after the run, one
+  `channel <edgeId> <source> -> <target> (<channel>, <policy>): maxDepth <n>`
+  line per edge. The in-memory `EngineRunOutcome` gains an optional
+  `channels` array (`EngineChannelStat`: edge, policy, capacity, `maxDepth`);
+  it is not written to `result.json`. `BoundedChannel` exposes
+  `waitingTakers`, `waitingPutters`, `isClosed` and an `ops` counter. New
+  constants `DEFAULT_STALL_MS` and `STALL_CHECK_INTERVAL_MS` in the engine
+  module.
+- Tests: `test/engine/elastic-channels-stall.mjs` (run by `npm test` after
+  the golden suite) replays the five FINDINGS 1.5 overspeed cases with HERE
+  mocked: all succeed under elastic channels with the expected lookup counts
+  (179, 179, 179, capped at 100) and events; under `channelMode: 'bounded'`
+  the three deadlocking ones fail as a stall naming `cmp` and `rs`; a deadline
+  run reports `cancelled`; a frames edge still backpressures (`maxDepth` <=
+  32) while a json edge in the same graph buffers; live mode keeps its
+  policies.
+
 ## 0.5.0 (2026-09-28)
 
 Webhooks on `output.event` and `nodeId` on events. A minor under the policy

@@ -7,6 +7,14 @@
  *   which is what backpressures a batch source down to its slowest consumer.
  * - `drop-oldest` policy (live-mode frames channels): push() always resolves
  *   immediately, evicting the oldest buffered message when full (latest wins).
+ * - `unbounded` policy (0.5.1: non-frames edges in batch and simulation
+ *   modes): push() always buffers and resolves immediately; `capacity` is
+ *   ignored. A producer never waits on a consumer, so one silent branch of a
+ *   fan-out cannot stall its siblings (the merge deadlock, FINDINGS 1.4).
+ *
+ * The channel also exposes its wait state (`waitingTakers`, `waitingPutters`)
+ * and an operation counter (`ops`) so the engine's stall detector can tell a
+ * graph that is blocked on its own channels from one that is busy.
  *
  * cancel() detaches the channel: pending and future pushes resolve immediately
  *   and are dropped, pending and future takes complete as done. The engine
@@ -15,7 +23,7 @@
  *   consumer that will never read again.
  */
 
-export type ChannelPolicy = 'block' | 'drop-oldest';
+export type ChannelPolicy = 'block' | 'drop-oldest' | 'unbounded';
 
 interface Putter<T> {
   value: T;
@@ -30,16 +38,33 @@ export class BoundedChannel<T> {
   private putters: Array<Putter<T>> = [];
   /** High-water mark, exposed for backpressure assertions in tests. */
   public maxDepth = 0;
+  /** Messages accepted plus messages delivered; moves whenever the channel makes progress. */
+  public ops = 0;
 
   constructor(
     public readonly capacity: number,
     public readonly policy: ChannelPolicy = 'block',
   ) {
-    if (capacity < 1) throw new Error('channel capacity must be >= 1');
+    if (!(capacity >= 1)) throw new Error('channel capacity must be >= 1');
   }
 
   get depth(): number {
     return this.buffer.length;
+  }
+
+  /** Consumers parked in take() on an empty, open channel. */
+  get waitingTakers(): number {
+    return this.takers.length;
+  }
+
+  /** Producers parked in push() on a full channel (`block` policy only). */
+  get waitingPutters(): number {
+    return this.putters.length;
+  }
+
+  /** True once close() or cancel() ran. */
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   /** Accepts `value`; the promise resolves when the channel has taken it (or dropped it). */
@@ -47,15 +72,18 @@ export class BoundedChannel<T> {
     if (this.closed || this.cancelled) return Promise.resolve(); // dropped
     const taker = this.takers.shift();
     if (taker) {
+      this.ops += 1;
       taker({ value, done: false });
       return Promise.resolve();
     }
-    if (this.buffer.length < this.capacity) {
+    if (this.policy === 'unbounded' || this.buffer.length < this.capacity) {
+      this.ops += 1;
       this.buffer.push(value);
       this.maxDepth = Math.max(this.maxDepth, this.buffer.length);
       return Promise.resolve();
     }
     if (this.policy === 'drop-oldest') {
+      this.ops += 1;
       this.buffer.shift();
       this.buffer.push(value);
       return Promise.resolve();
@@ -86,6 +114,7 @@ export class BoundedChannel<T> {
 
   take(): Promise<IteratorResult<T>> {
     if (this.buffer.length > 0) {
+      this.ops += 1;
       const value = this.buffer.shift()!;
       const putter = this.putters.shift();
       if (putter) {
@@ -97,6 +126,7 @@ export class BoundedChannel<T> {
     }
     const putter = this.putters.shift();
     if (putter) {
+      this.ops += 1;
       putter.resolve();
       return Promise.resolve({ value: putter.value, done: false });
     }
