@@ -207,7 +207,8 @@ export const def = defineNode({
 //   the error ratio is checked once, at the end, with no minimum. Collecting
 //   the input is the buffering the point-mode rule above avoids: it needs
 //   batch channels that do not block a fan-out producer (elastic channels,
-//   P0.1, or a channelCapacity above the sample count), and it is refused in
+//   the batch default since 0.5.1; under channelMode 'bounded', a
+//   channelCapacity above the sample count), and it is refused in
 //   live runs, where a bounded look-ahead window would still stall a
 //   ts-merging consumer of the same source.
 
@@ -945,7 +946,8 @@ export const executor = async function* connectorThirdParty(
     };
 
     if (cfg.lookupMode === 'trace') {
-      // Collect the input (safe in batch runs with elastic channels, or a
+      // Collect the input (safe in batch runs with elastic channels, the
+      // default since 0.5.1; under channelMode 'bounded' it needs a
       // channelCapacity above the sample count; see the trace-mode notes in
       // the CHANGELOG), match it chunk by chunk, then emit one record per
       // sample in ts order.

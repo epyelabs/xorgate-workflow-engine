@@ -76,6 +76,22 @@ xwe doctor                                                    # ffmpeg, ONNX Run
   value is emitted as `json/result`. `xwe function test` runs one event
   through a node's handler; `examples/functions/` has the docs' example.
 - **Webhooks**: see [Webhooks](#webhooks) below.
+- **Third-party lookups** (`connector.third_party`): requests are paced per
+  provider (HERE 5/s, Google Roads 10/s, OSM 1/s; `maxRequestsPerSecond`),
+  retried on 429/5xx honouring `Retry-After` (`retry`), bounded by
+  `requestTimeoutMs`, and can skip failed lookups within an error budget
+  (`onLookupError: "skip"`, `maxErrorRatio`) and emit null "no answer"
+  records (`emitNoAnswer`); `osmEndpoint` points OSM at another Overpass
+  server. `lookupMode: "trace"` route-matches the whole input with HERE in
+  chunked requests (batch and simulation runs only). `logic.comparator`'s
+  `maxReferenceAgeMs` and `fallbackReference` handle a stale or missing
+  reference.
+- **Channels**: in batch and simulation runs every edge except `frames` and
+  `video` buffers without bound, so a fan-out that later merges by timestamp
+  cannot deadlock; `engine.run({ channelMode: "bounded" })` restores the
+  pre-0.5.1 behaviour. A stall detector (`stallMs`, default 30 s, 0 disables)
+  fails a graph whose running nodes are all parked with no progress, and the
+  nodes still running at a stall or deadline are reported `cancelled`.
 - **Exit codes**: `0` success; `1` the run failed (the failing node is named,
   `result.json` still written); `2` usage or configuration, nothing ran.
 - **Logging**: `--log-level silent | error | info | debug` on any command

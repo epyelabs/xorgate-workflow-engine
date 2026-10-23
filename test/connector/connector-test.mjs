@@ -4,9 +4,8 @@
 // runGraph with HTTP mocked (no network) and a virtual clock for pacing and
 // back-off. Run `npm run build` first (`npm test` does).
 //
-// Channel capacity: graphs that buffer a whole input (trace mode) pass a large
-// `channelCapacity` through EngineRunDeps, since main's batch channels are
-// still bounded at 32 (P0.1 makes them unbounded on another branch).
+// Channel capacity: trace mode buffers a whole input; it runs on the default
+// batch channels (elastic since 0.5.1, no `channelCapacity` override).
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, dirname } from 'node:path';
@@ -24,7 +23,6 @@ function check(name, ok, detail = '') {
   if (!ok) failed = true;
 }
 const readJson = (p) => JSON.parse(readFileSync(join(root, p), 'utf8'));
-const BIG_CAPACITY = 1_000_000;
 
 // --- virtual clock ---------------------------------------------------------------
 function useVirtualClock(start = 1_800_000_000_000) {
@@ -59,7 +57,7 @@ function connectorGraph(roadsConfig) {
 async function run(definition, samples, httpFetch, extra = {}) {
   const outcome = await engine.runGraph(
     { runId: 'connector-test', mode: extra.mode ?? 'batch', deviceId: null, window: null, definition, bindings: { src: { kind: 'telemetry_inline', samples } } },
-    { sources: {}, secrets: { getSecret: async () => 'test-key-0123456789' }, httpFetch, log: () => {}, ...(extra.channelCapacity ? { channelCapacity: extra.channelCapacity } : {}), deadlineMs: extra.deadlineMs ?? 30000 },
+    { sources: {}, secrets: { getSecret: async () => 'test-key-0123456789' }, httpFetch, log: () => {}, ...(extra.channelMode ? { channelMode: extra.channelMode } : {}), deadlineMs: extra.deadlineMs ?? 30000 },
   );
   const step = (id) => outcome.steps.find((s) => s.nodeId === id);
   return { outcome, step, records: (outcome.captures.cap ?? []).map((c) => c.record) };
@@ -340,7 +338,7 @@ const csvSamples = (p) => {
   const urls = [];
   const inits = [];
   useVirtualClock();
-  const r = await run(tpl, samples, async (url, init) => { urls.push(String(url)); bodies.push(String(init.body)); inits.push(init); return json(fixture); }, { channelCapacity: BIG_CAPACITY });
+  const r = await run(tpl, samples, async (url, init) => { urls.push(String(url)); bodies.push(String(init.body)); inits.push(init); return json(fixture); });
   realClock();
   const u = new URL(urls[0] ?? 'http://x/');
   const rows = (bodies[0] ?? '').trim().split('\n');
@@ -361,7 +359,7 @@ const csvSamples = (p) => {
   useVirtualClock();
   const bodies = [];
   const samples = drive(25);
-  const r = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 4 })), samples, mockHere({ bodies }), { channelCapacity: BIG_CAPACITY });
+  const r = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 4 })), samples, mockHere({ bodies }));
   realClock();
   const firstTs = bodies.map((b) => Date.parse(b.split('\n')[1].split(',')[2]) - samples[0].ts);
   const sizes = bodies.map((b) => b.trim().split('\n').length - 1);
@@ -378,7 +376,7 @@ const csvSamples = (p) => {
   samples[15] = { ts: samples[15].ts, signals: { 'gps.speed': 50 } }; // no position
   const lat5 = samples[5].signals['gps.lat'];
   const lat9 = samples[9].signals['gps.lat'];
-  const r = await run(connectorGraph(traceCfg()), samples, mockHere({ unmatched: (p) => p.lat >= lat5 - 1e-7 && p.lat <= lat9 + 1e-7, limitFor: (p) => (p.lat > samples[17].signals['gps.lat'] - 1e-7 ? null : 60) }), { channelCapacity: BIG_CAPACITY });
+  const r = await run(connectorGraph(traceCfg()), samples, mockHere({ unmatched: (p) => p.lat >= lat5 - 1e-7 && p.lat <= lat9 + 1e-7, limitFor: (p) => (p.lat > samples[17].signals['gps.lat'] - 1e-7 ? null : 60) }));
   realClock();
   const shape = r.records.map((x) => (x.speedLimitKph === null ? `${x.reason}:${x.matched}` : x.speedLimitKph)).join(',');
   const want = [...Array(5).fill(60), ...Array(5).fill('no_answer:false'), ...Array(5).fill(60), 'no_position:false', 60, 'no_answer:true', 'no_answer:true', 'no_answer:true'].join(',');
@@ -391,22 +389,22 @@ const csvSamples = (p) => {
   const clock = useVirtualClock();
   let n = 0;
   const here = mockHere();
-  const r = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 2 })), drive(18), (url, init) => (++n === 1 ? json({ error: 'Too Many Requests' }, 429, { 'Retry-After': '1' }) : here(url, init)), { channelCapacity: BIG_CAPACITY });
+  const r = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 2 })), drive(18), (url, init) => (++n === 1 ? json({ error: 'Too Many Requests' }, 429, { 'Retry-After': '1' }) : here(url, init)));
   realClock();
   check('trace 429: the first chunk is retried after Retry-After 1 s, then both chunks answer', r.outcome.status === 'succeeded' && n === 3 && clock.sleeps.includes(1000) && r.records.length === 18 && r.records.every((x) => x.matched) && /, 2 lookup\(s\), 1 retry/.test(r.step('roads').output), `${r.outcome.error} | ${r.step('roads').output} | ${clock.sleeps}`);
 }
 {
   useVirtualClock();
   const failMid = (k) => (k === 1 ? json({ error: 'boom' }, 500) : null);
-  const ok = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 0, onLookupError: 'skip', maxErrorRatio: 0.5, retry: { attempts: 1 } })), drive(30), mockHere({ fail: failMid }), { channelCapacity: BIG_CAPACITY });
+  const ok = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 0, onLookupError: 'skip', maxErrorRatio: 0.5, retry: { attempts: 1 } })), drive(30), mockHere({ fail: failMid }));
   const shape = ok.records.map((x) => (x.speedLimitKph === null ? x.reason : 'ok'));
   check('trace chunk failure with skip: the run stays green, the failed chunk\'s samples are null (reason error)', ok.outcome.status === 'succeeded' && shape.length === 30 && shape.slice(10, 20).every((x) => x === 'error') && shape.slice(0, 10).concat(shape.slice(20)).every((x) => x === 'ok'), `${ok.outcome.error} ${shape}`);
-  const tripped = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 0, onLookupError: 'skip', retry: { attempts: 1 } })), drive(30), mockHere({ fail: failMid }), { channelCapacity: BIG_CAPACITY });
+  const tripped = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 0, onLookupError: 'skip', retry: { attempts: 1 } })), drive(30), mockHere({ fail: failMid }));
   check('trace chunk failure with skip: 1 of 3 chunks > maxErrorRatio 0.2 fails the node at the end', tripped.outcome.status === 'failed' && /failing too often \(1\/3 > maxErrorRatio 0\.2\)/.test(tripped.outcome.error), tripped.outcome.error);
-  const failed = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 0, retry: { attempts: 1 } })), drive(30), mockHere({ fail: failMid }), { channelCapacity: BIG_CAPACITY });
+  const failed = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 0, retry: { attempts: 1 } })), drive(30), mockHere({ fail: failMid }));
   check('trace chunk failure with fail (default): the node fails naming the chunk', failed.outcome.status === 'failed' && /HERE trace request failed \(HTTP 500, points 10-19\)/.test(failed.outcome.error), failed.outcome.error);
   const bodies = [];
-  const capped = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 4, maxLookupsPerRun: 2 })), drive(25), mockHere({ bodies }), { channelCapacity: BIG_CAPACITY });
+  const capped = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 4, maxLookupsPerRun: 2 })), drive(25), mockHere({ bodies }));
   const reasons = capped.records.map((x) => x.reason ?? 'ok');
   check('trace cap: maxLookupsPerRun counts requests; samples owned by unsent chunks are null (reason capped)', capped.outcome.status === 'succeeded' && bodies.length === 2 && reasons.slice(0, 14).every((x) => x === 'ok') && reasons.slice(14).every((x) => x === 'capped') && /11 skipped by lookup cap/.test(capped.step('roads').output), `${reasons} | ${capped.step('roads').output}`);
   realClock();
@@ -418,7 +416,7 @@ const csvSamples = (p) => {
   const parked = Array.from({ length: 10 }, (_, i) => ({ ts: 1_792_000_000_000 + i * 1000, signals: { 'gps.lat': 43.65 + (i % 2) * 0.00001, 'gps.lon': -79.5, 'gps.speed': 0 } }));
   const moving = drive(10, { t0: 1_792_000_010_000, lat0: 43.6502 });
   const bodies = [];
-  const r = await run(connectorGraph(traceCfg({ traceMinSpacingM: 5 })), [...parked, ...moving], mockHere({ bodies }), { channelCapacity: BIG_CAPACITY });
+  const r = await run(connectorGraph(traceCfg({ traceMinSpacingM: 5 })), [...parked, ...moving], mockHere({ bodies }));
   realClock();
   const sent = bodies[0].trim().split('\n').length - 1;
   check('traceMinSpacingM 5: ten parked samples (1 m jitter) are sent as one point and all take its answer; moving samples are all sent', r.outcome.status === 'succeeded' && sent === 11 && r.records.length === 20 && r.records.slice(0, 10).every((x) => x.linkId === '+c0p0') && new Set(r.records.slice(10).map((x) => x.linkId)).size === 10, `sent=${sent} ${JSON.stringify(r.records.map((x) => x.linkId))}`);
@@ -439,7 +437,7 @@ const csvSamples = (p) => {
   const samples = Array.from({ length: 3600 }, (_, s) => ({ ts: 1_792_000_000_000 + s * 1000, signals: { 'gps.lat': 43.6 + s * 0.00011, 'gps.lon': -79.5, 'gps.speed': s % 600 < 120 ? 60 : 40, 'gps.heading': 0 } }));
   const bodies = [];
   const started = Date.now();
-  const r = await run(tpl, samples, mockHere({ bodies }), { channelCapacity: BIG_CAPACITY });
+  const r = await run(tpl, samples, mockHere({ bodies }));
   const ms = Date.now() - started;
   console.log(`     (1 h trace drive wall time: ${ms} ms)`);
   check('1 h drive (3600 samples): 4 chunk requests instead of ~360 point lookups, 3600 records, 6 overspeed events, well under 5 s', r.outcome.status === 'succeeded' && bodies.length === 4 && r.records.length === 3600 && r.outcome.events.length === 6 && ms < 5000, `${ms} ms, ${bodies.length} requests, ${r.records.length} records, ${r.outcome.events.length} events, ${r.outcome.error}`);

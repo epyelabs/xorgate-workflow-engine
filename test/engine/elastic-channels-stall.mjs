@@ -20,6 +20,12 @@ const { runGraph, createCatalog, corePacks, defineNode, createEngine, engineResu
   join(root, 'dist/esm/index.js')
 );
 const { localHost } = await import(join(root, 'dist/esm/local/index.js'));
+// The connector paces provider requests (0.5.1: HERE 5/s). These cases are
+// about channels and stalls, not pacing, and their timing bounds assume
+// lookups answer at once: neutralize the pacing sleep through the
+// connector's clock seam (the same ESM module instance the catalog runs).
+const { connectorClock } = await import(join(root, 'dist/esm/catalog/nodes/connector-third-party.js'));
+connectorClock.sleep = async () => {};
 
 let failed = false;
 function check(name, ok, detail = '') {

@@ -168,7 +168,7 @@ check(
   // The core hash moves on purpose on minors (docs/compatibility.md): 0.2.0 added the two
   // function nodes (08c8c39436928e5e); 0.4.0 added output.visualization's `distance`
   // overlay, model.depth's distanceScale and proximity_gate's maxDistanceM (2b2a3c052696cf1e);
-  // 0.5.0 added output.event's `webhook` (f8861576c807e382); unreleased: connector.third_party's
+  // 0.5.0 added output.event's `webhook` (f8861576c807e382); 0.5.1: connector.third_party's
   // rate policy / no-answer / trace fields and logic.comparator's maxReferenceAgeMs /
   // fallbackReference (current hash below). Without core/function the 26 older defs hash to the
   // second value below (0.5.0: 184300277358e824; 0.4.0: ab458ea46642308b; 0.1.0-0.3.0: e481243f5ffe4678).

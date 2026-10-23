@@ -487,7 +487,7 @@ function serveDir(dir) {
     let out = null;
     try { out = JSON.parse(lib.stdout.trim().split('\n').at(-1)); } catch { /* reported below */ }
     check(`packs (${fmt}) library script runs`, lib.status === 0 && out !== null, lib.stderr.trim().split('\n').slice(-3).join(' | '));
-    // 0.5.0: the core hash moved on purpose (output.event's webhook field).
+    // 0.5.1: the core hash moved on purpose (connector.third_party / logic.comparator fields).
     check(`packs (${fmt}): the core payload is the current one: 92697a69913738c4, 28 nodes, one core pack entry with that hash`,
       out?.coreVersion === '92697a69913738c4' && out?.coreNodes === 28 && JSON.stringify(out?.corePacks) === JSON.stringify([{ name: 'core', version: pkgVersion, hash: '92697a69913738c4' }]), JSON.stringify(out?.corePacks));
     check(`packs (${fmt}): corePacks are the eight core namespaces in registry order, core/function last`,
@@ -641,6 +641,61 @@ for (const [fmt, argv, imports] of [
   check('hygiene (cli): XWE_MODEL_REGISTRY with credentials is refused naming the variable, never the value', r.status === 2 && r.stderr.trim() === 'xwe: XWE_MODEL_REGISTRY must not carry credentials (user:password@host); point it at a registry or mirror that needs none' && !r.stdout.includes('tok-SECRET-VALUE'), r.stderr.trim());
   r = xwe(['doctor'], credEnv);
   check('hygiene (cli): doctor reports a credentialed registry URL as not usable without printing it', r.stdout.includes('  registry          not usable: XWE_MODEL_REGISTRY must not carry credentials') && !r.stdout.includes('tok-SECRET-VALUE'), r.stdout.split('\n').find((l) => l.startsWith('  registry')));
+}
+
+// --- HERE trace mode (0.5.1) in default batch mode: no channel overrides ------
+// fixtures/templates/overspeed-here-trace.json through createEngine + localHost
+// with only httpFetch mocked: the recorded intersection answer over its
+// 15-sample trace, then a 30-minute drive (1800 samples, far past the 32-slot
+// channel capacity) whose trace node buffers the whole input while the
+// comparator reads the same source. Elastic batch channels (the default) let
+// it finish; `channelMode: 'bounded'` stalls it, which is the contrast that
+// shows the default is doing the work.
+{
+  const traceRoot = join(outRoot, 'here-trace');
+  mkdirSync(traceRoot, { recursive: true });
+  const driveCsv = join(traceRoot, 'drive-1800.csv');
+  const t0 = 1792269400000;
+  writeFileSync(driveCsv, 'ts,gps.lat,gps.lon,gps.speed,gps.heading\n' + Array.from({ length: 1800 }, (_, i) => `${t0 + i * 1000},${(43.65 + i * 0.0002).toFixed(6)},-79.500000,60.0,0.0`).join('\n') + '\n');
+  const script = `
+    import { readFileSync } from 'node:fs';
+    import { createEngine } from ${JSON.stringify(join(root, 'dist/esm/index.js'))};
+    import { localHost } from ${JSON.stringify(join(root, 'dist/esm/local/index.js'))};
+    const template = JSON.parse(readFileSync(${JSON.stringify(join(root, 'fixtures/templates/overspeed-here-trace.json'))}, 'utf8'));
+    const recorded = readFileSync(${JSON.stringify(join(root, 'fixtures/connector/here-routematch-intersection.json'))}, 'utf8');
+    // Answers every trace point on one 40 km/h link per chunk.
+    let chunk = 0;
+    const synthetic = async (url, init) => {
+      const [, ...rows] = String(init.body).trim().split('\\n');
+      const linkId = '+golden' + chunk++;
+      const waypoint = rows.map((r) => ({ linkId, routeLinkSeqNrMatched: 0, timestamp: Date.parse(r.split(',')[2]), confidenceValue: 0.9 }));
+      return new Response(JSON.stringify({ response: { route: [{ waypoint, leg: [{ link: [{ linkId, attributes: { SPEED_LIMITS_FCN: [{ FROM_REF_SPEED_LIMIT: '40', TO_REF_SPEED_LIMIT: '40', UNIT: 'K' }] } }] }] }] } }), { status: 200 });
+    };
+    const runs = {
+      intersection: { csv: ${JSON.stringify(join(root, 'fixtures/telemetry/intersection-trace.csv'))}, http: async () => new Response(recorded, { status: 200 }), opts: {} },
+      drive: { csv: ${JSON.stringify(driveCsv)}, http: synthetic, opts: {} },
+      bounded: { csv: ${JSON.stringify(driveCsv)}, http: synthetic, opts: { channelMode: 'bounded', stallMs: 2000 } },
+    };
+    const results = {};
+    for (const [name, r] of Object.entries(runs)) {
+      chunk = 0;
+      const local = localHost({ outDir: ${JSON.stringify(traceRoot)}, baseDir: ${JSON.stringify(root)} });
+      const host = { bind: async (a) => ({ ...(await local.bind(a)), httpFetch: r.http }) };
+      const started = Date.now();
+      const run = await createEngine({ host }).run({ template, inputs: { telemetry: r.csv }, runId: 'golden-here-trace-' + name, ...r.opts });
+      const step = (id) => run.result.steps.find((s) => s.nodeId === id);
+      results[name] = { status: run.result.status, error: run.result.error, roads: step('roads')?.output, cmp: step('cmp')?.output, statuses: run.result.steps.map((s) => s.status), records: run.result.artifacts.outputs.cap?.count ?? 0, events: run.result.events.length, kinds: [...new Set(run.result.events.map((e) => e.kind))], ms: Date.now() - started };
+    }
+    console.log('RESULT ' + JSON.stringify(results));
+  `;
+  const res = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: root, encoding: 'utf8', env: { ...process.env, XORGATE_SECRET_HERE_API_KEY: 'hk-golden-trace-0123456789' } });
+  let tr = null;
+  try { tr = JSON.parse(res.stdout.split('\n').find((l) => l.startsWith('RESULT ')).slice(7)); } catch { /* reported below */ }
+  const why = (r) => (r ? JSON.stringify(r) : res.stderr.trim().split('\n').slice(-3).join(' | '));
+  console.log(`     (here trace wall time: intersection ${tr?.intersection?.ms} ms, drive ${tr?.drive?.ms} ms, bounded ${tr?.bounded?.ms} ms)`);
+  check('here trace (default batch): the intersection template run succeeds, 15 records from 1 request, all 15 points matched, no event', res.status === 0 && tr?.intersection?.status === 'succeeded' && tr.intersection.records === 15 && tr.intersection.events === 0 && /^15 speed-limit record\(s\) via here \(trace\), 1 lookup\(s\), 15\/15 trace point\(s\) matched in 1 chunk\(s\)$/.test(tr.intersection.roads ?? '') && /^true on 0\/15 samples/.test(tr.intersection.cmp ?? ''), why(tr?.intersection));
+  check('here trace (default batch): a 1800-sample drive buffers past the channel capacity without a stall, 2 chunk requests, 1800 records, overspeed against the matched 40', tr?.drive?.status === 'succeeded' && tr.drive.statuses.every((s) => s === 'ok') && tr.drive.records === 1800 && /^1800 speed-limit record\(s\) via here \(trace\), 2 lookup\(s\), 1800\/1800 trace point\(s\) matched in 2 chunk\(s\)$/.test(tr.drive.roads ?? '') && /^true on 1800\/1800 samples/.test(tr.drive.cmp ?? '') && tr.drive.events >= 1 && tr.drive.kinds.join() === 'overspeed', why(tr?.drive));
+  check("here trace (contrast): the same drive under channelMode 'bounded' fails as a stall", tr?.bounded?.status === 'failed' && /stall/i.test(tr.bounded.error ?? ''), why(tr?.bounded));
 }
 
 // --- --log-level on the CLI and createEngine({ log }) in the library ------------
