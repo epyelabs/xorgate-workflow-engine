@@ -11,8 +11,8 @@ version number follows the policy in [docs/compatibility.md](./docs/compatibilit
 A minor under `docs/compatibility.md`: additive optional config on
 `connector.third_party` and `logic.comparator`, additive fields on their
 records, new exports from the connector module. The core catalog moves from
-`f8861576c807e382` to `4b1a1732646c0e0d` (28 nodes); without `core/function`
-the 26 other defs move from `184300277358e824` to `3759a3cca37524e3`.
+`f8861576c807e382` to `92697a69913738c4` (28 nodes; `4b1a1732646c0e0d` at the P0.3 commit); without `core/function`
+the 26 other defs move from `184300277358e824` to `22138d958ba19520`.
 
 #### Added (P0.3: rate policy, retries, timeouts, error budget, no-answer records)
 
@@ -59,6 +59,66 @@ the 26 other defs move from `184300277358e824` to `3759a3cca37524e3`.
   clock, 429 then success with and without `Retry-After`, a hung fetch hitting
   the timeout, the skip path and the error budget, `emitNoAnswer`, and the
   stale-limit scenario on the production graph.
+
+#### Added (P1.1: HERE trace mode)
+
+- `connector.third_party` config `lookupMode: 'point' | 'trace'` (default
+  `point`), with `traceChunkPoints` (default 1000), `traceOverlapPoints`
+  (default 10, capped below half a chunk) and `traceMinSpacingM` (default 0).
+  Trace mode is HERE only: the whole input is collected, points closer than
+  `traceMinSpacingM` to the last kept one are dropped (they take its answer),
+  and the trace is POSTed to Route Matching v8 (`/v8/match/routelinks`,
+  `routeMatch=1`, `mode=fastest;car;traffic:disabled`,
+  `attributes=SPEED_LIMITS_FCn(*)`) as a `text/plain` CSV trace
+  (`latitude,longitude,timestamp` in ISO 8601 UTC, plus `heading` and
+  `speed_kmh` when every point carries `gps.heading`/`gps.course` and
+  `gps.speed`), one request per chunk. Consecutive chunks share
+  `traceOverlapPoints`; each shared point is answered by the chunk where it
+  sits further from the edge. Every matched waypoint is mapped to its link
+  (`routeLinkSeqNrMatched` into the route's links across legs, else by
+  `linkId`; waypoints pair with points by order, or by echoed `timestamp`
+  when HERE returns fewer), and the link's `SPEED_LIMITS_FCN` row gives the
+  limit for the driven direction (positive link id: `FROM_REF_SPEED_LIMIT`,
+  negative: `TO_REF_SPEED_LIMIT`, the other direction when empty; `UNIT: 'M'`
+  converts from mph). The response is read with or without the `response`
+  wrapper.
+- Trace output: one record per input sample, in ts order:
+  `{ ts, speedLimitKph | null, source: 'here', linkId?, matched, reason? }`
+  (`reason` on null records: `no_answer`, `capped`, `error`, or
+  `no_position` for a sample without a position). Nulls are always emitted in
+  trace mode, so the comparator never holds a stale limit.
+- Trace errors: a failed chunk follows `onLookupError` (with `skip` its
+  samples get reason `error`); the error ratio is checked once at the end,
+  with no minimum lookup count. `maxLookupsPerRun` counts chunk requests;
+  samples owned by unsent chunks get reason `capped`. Pacing, retries and
+  `Retry-After` apply per chunk; `requestTimeoutMs` defaults to 30000 per
+  chunk (10000 in point mode).
+- Where it runs: batch and simulation runs. A live run fails the node at
+  start with a clear message (a bounded `traceWindowSeconds` look-ahead would
+  still stall a ts-merging consumer of the same source on bounded live
+  channels, so trace mode is refused there rather than half-supported). A
+  provider other than HERE fails at start too. Collecting the input needs
+  batch channels that never block a fan-out producer: the elastic channels of
+  P0.1, or `EngineRunDeps.channelCapacity` above the sample count. On 0.5.0's
+  bounded channels (32) a graph that also feeds the source into the
+  comparator stalls until the run deadline.
+- Connector module exports: `buildHereTraceCsv`, `buildHereTraceRequest`,
+  `parseHereTraceResponse`, `hereLinkSpeedLimit`, `planTraceChunks`,
+  `haversineM`, and the types `HereTracePoint`, `HereTraceMatch`,
+  `HereLink`, `HereWaypoint`, `HereRoute`, `HereSpeedLimitRow`,
+  `TraceChunk`. `parseHereResponse` (point mode) also reads a top-level
+  `route`.
+- Fixtures: `fixtures/telemetry/intersection-trace.csv` (15 s at 45 km/h
+  through an arterial/side-street intersection), the recorded-style answer
+  `fixtures/connector/here-routematch-intersection.json` (built from HERE's
+  documented schema, not from a live call), and
+  `fixtures/templates/overspeed-here-trace.json` (`src -> roads(trace) ->
+  cmp.reference`, `src -> cmp.signal` at 1 Hz, `fallbackReference` 50,
+  debounce 10 s). Tests: the request shape, the intersection fixture (no
+  side-street flip), chunk boundaries and ownership with overlap, unmatched
+  points and missing positions giving null, the 429 path, chunk failures with
+  `skip` / `fail`, the request cap, decimation, live and non-HERE refusal, and
+  a 1 h synthetic drive (3600 samples, 4 requests, about 0.6 s).
 
 #### Executor behaviour
 

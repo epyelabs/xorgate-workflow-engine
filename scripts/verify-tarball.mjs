@@ -113,7 +113,7 @@ function checkCli(dir) {
   } else fail(`npx xwe run: exit ${r.status} ${r.stderr.trim().split('\n').at(-1)}`);
   const d = run('npx', ['--no-install', 'xwe', 'doctor'], { cwd: dir });
   const lines = d.stdout.trim().split('\n');
-  if (/^xwe \S+ \(node /.test(lines[0] ?? '') && lines.some((l) => l.includes('core 4b1a1732646c0e0d')) && lines.some((l) => /^  python3 {11}/.test(l))) pass(`npx xwe doctor prints (exit ${d.status}):\n      ${lines.join('\n      ')}`);
+  if (/^xwe \S+ \(node /.test(lines[0] ?? '') && lines.some((l) => l.includes('core 92697a69913738c4')) && lines.some((l) => /^  python3 {11}/.test(l))) pass(`npx xwe doctor prints (exit ${d.status}):\n      ${lines.join('\n      ')}`);
   else fail(`npx xwe doctor: exit ${d.status}\n${d.stdout}${d.stderr}`);
   // The function runtime from the installed package: both runners, through `xwe function test`.
   for (const [tpl, lang] of [['forklift-summary.json', 'javascript'], ['forklift-summary-python.json', 'python']]) {

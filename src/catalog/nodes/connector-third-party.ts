@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { requireInput, telemetrySamples } from '../../engine/helpers';
-import type { EngineEmit, EngineInChannel, EngineRunCtx } from '../types';
+import type { EngineEmit, EngineInChannel, EngineRunCtx, TelemetrySample } from '../types';
 import { defineNode } from '../types';
 
 // Third-party data connector; the provider is node config. All three providers
@@ -25,6 +25,7 @@ export const OSM_SEARCH_RADIUS_M = 30;
 /** Default pacing per provider (requests per second), when `maxRequestsPerSecond` is unset. */
 export const DEFAULT_REQUESTS_PER_SECOND: Record<SpeedLimitProvider, number> = { osm: 1, here: 5, google_roads: 10 };
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10000;
+export const DEFAULT_TRACE_REQUEST_TIMEOUT_MS = 30000;
 /** A Retry-After longer than this is not waited out: the lookup fails (or is skipped) instead. */
 export const MAX_RETRY_AFTER_MS = 60000;
 /** maxErrorRatio is enforced mid-run only once this many lookups were made (and always at the end). */
@@ -79,7 +80,7 @@ const configSchema = z.object({
     .positive()
     .max(120000)
     .optional()
-    .describe('Per-request timeout, body included (default 10000)'),
+    .describe('Per-request timeout, body included (default 10000 in point mode, 30000 per trace chunk)'),
   onLookupError: z
     .enum(['fail', 'skip'])
     .default('fail')
@@ -107,6 +108,40 @@ const configSchema = z.object({
     .url()
     .default(OVERPASS_URL)
     .describe('Overpass interpreter URL (a self-hosted instance for production volume)'),
+  lookupMode: z
+    .enum(['point', 'trace'])
+    .default('point')
+    .describe(
+      'point: one lookup per unique position (every provider, live included). trace (HERE only, batch and ' +
+        'simulation runs): the whole input is route-matched as GPS traces in chunks, and every sample gets the ' +
+        'limit of the road it was matched to, or null. Far fewer requests, no side-street flips.',
+    ),
+  traceChunkPoints: z
+    .number()
+    .int()
+    .min(2)
+    .max(10000)
+    .default(1000)
+    .describe('trace: points per route-matching request (HERE accepts up to 100,000 points / 15,000 km per trace)'),
+  traceOverlapPoints: z
+    .number()
+    .int()
+    .min(0)
+    .max(1000)
+    .default(10)
+    .describe(
+      'trace: points shared by consecutive chunks, so each chunk edge is matched with context (capped at ' +
+        'half a chunk); each shared point takes its answer from the chunk where it is further from the edge',
+    ),
+  traceMinSpacingM: z
+    .number()
+    .min(0)
+    .max(1000)
+    .default(0)
+    .describe(
+      'trace: drop points closer than this to the last kept point before sending (stationary GPS); dropped ' +
+        'samples take the answer of the last kept point. 0 sends every positioned sample.',
+    ),
 });
 
 export const def = defineNode({
@@ -161,6 +196,20 @@ export const def = defineNode({
 //   demo/light use; `osmEndpoint` points at a self-hosted Overpass.
 // - The step summary is set in a finally, and a failure message carries the
 //   lookup counts, so a failed step still says how far it got.
+// - Trace mode (P1.1, `lookupMode: 'trace'`, HERE only): the whole input is
+//   collected, stationary points are optionally decimated
+//   (`traceMinSpacingM`), and the trace is route-matched in overlapping
+//   chunks (`traceChunkPoints`, `traceOverlapPoints`), one request each,
+//   paced and retried like point lookups; `maxLookupsPerRun` counts chunk
+//   requests. Every sample then gets one record, in ts order:
+//   `{ ts, speedLimitKph | null, source: 'here', linkId?, matched, reason? }`.
+//   A failed chunk follows `onLookupError` (its samples get reason 'error');
+//   the error ratio is checked once, at the end, with no minimum. Collecting
+//   the input is the buffering the point-mode rule above avoids: it needs
+//   batch channels that do not block a fan-out producer (elastic channels,
+//   P0.1, or a channelCapacity above the sample count), and it is refused in
+//   live runs, where a bounded look-ahead window would still stall a
+//   ts-merging consumer of the same source.
 
 /** One provider answer for one rounded position; null limit = no answer. */
 export interface SpeedLimitLookup {
@@ -222,24 +271,50 @@ export function buildHereRequest(
   };
 }
 
-export interface HereRouteMatchResponse {
-  response?: {
-    route?: Array<{
-      leg?: Array<{
-        link?: Array<{
-          attributes?: {
-            SPEED_LIMITS_FCN?: Array<{
-              FROM_REF_SPEED_LIMIT?: string | number;
-              TO_REF_SPEED_LIMIT?: string | number;
-            }>;
-          };
-        }>;
-      }>;
-    }>;
-  };
+/** One row of the SPEED_LIMITS_FCn attribute layer on a matched link. */
+export interface HereSpeedLimitRow {
+  LINK_ID?: string | number;
+  FROM_REF_SPEED_LIMIT?: string | number | null;
+  TO_REF_SPEED_LIMIT?: string | number | null;
+  /** 'K' km/h, 'M' mph. */
+  UNIT?: string;
 }
 
-function hereLimitValue(v: string | number | undefined): number | null {
+export interface HereLink {
+  /** Permanent link id; a leading '-' means the link is driven towards its reference node. */
+  linkId?: string | number;
+  confidence?: number;
+  attributes?: { SPEED_LIMITS_FCN?: HereSpeedLimitRow[] };
+}
+
+/** A matched trace point (Route Matching v8 `route[].waypoint[]`, schema TracePoint/WayPoint). */
+export interface HereWaypoint {
+  linkId?: string | number;
+  routeLinkSeqNrMatched?: number;
+  confidenceValue?: number;
+  timestamp?: number;
+  mappedPosition?: { latitude?: number; longitude?: number };
+  originalPosition?: { latitude?: number; longitude?: number };
+  matchDistance?: number;
+}
+
+export interface HereRoute {
+  waypoint?: HereWaypoint[];
+  leg?: Array<{ link?: HereLink[] }>;
+}
+
+/**
+ * Route Matching v8 `/v8/match/routelinks` answer. The documented OpenAPI
+ * schema puts `route` at the top level; responses have also been described
+ * with a `response` wrapper (v7 compatibility), so both are read.
+ */
+export interface HereRouteMatchResponse {
+  response?: { route?: HereRoute[]; warnings?: unknown[] };
+  route?: HereRoute[];
+  warnings?: unknown[];
+}
+
+function hereLimitValue(v: string | number | null | undefined): number | null {
   const n = typeof v === 'string' ? Number(v) : v;
   // 0 = unknown, 999 = HERE's "unlimited" marker: neither is a posted limit.
   if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0 || n >= 999) return null;
@@ -248,7 +323,7 @@ function hereLimitValue(v: string | number | undefined): number | null {
 
 /** First matched link with a usable speed-limit attribute; null = no answer. */
 export function parseHereResponse(data: HereRouteMatchResponse): SpeedLimitLookup {
-  for (const route of data.response?.route ?? []) {
+  for (const route of data.response?.route ?? data.route ?? []) {
     for (const leg of route.leg ?? []) {
       for (const link of leg.link ?? []) {
         for (const attr of link.attributes?.SPEED_LIMITS_FCN ?? []) {
@@ -259,6 +334,159 @@ export function parseHereResponse(data: HereRouteMatchResponse): SpeedLimitLooku
     }
   }
   return { speedLimitKph: null };
+}
+
+// --- HERE trace mode (Route Matching v8, whole-trace matching) ---------------------
+
+/** One trace point sent to HERE. */
+export interface HereTracePoint {
+  lat: number;
+  lng: number;
+  ts: number;
+  heading?: number;
+  speedKph?: number;
+}
+
+/** What one trace point matched to; `matched: false` when HERE returned no usable point for it. */
+export interface HereTraceMatch {
+  matched: boolean;
+  speedLimitKph: number | null;
+  linkId?: string;
+  confidence?: number;
+}
+
+/**
+ * A GPS trace as a CSV body (HERE's trace-file format: a header row of
+ * attribute names, then the points in temporal order). Columns: latitude,
+ * longitude, timestamp (ISO 8601 UTC) and, when every point has them,
+ * heading (degrees clockwise from north) and speed_kmh.
+ */
+export function buildHereTraceCsv(points: HereTracePoint[]): string {
+  const withHeading = points.length > 0 && points.every((p) => typeof p.heading === 'number' && Number.isFinite(p.heading));
+  const withSpeed = points.length > 0 && points.every((p) => typeof p.speedKph === 'number' && Number.isFinite(p.speedKph));
+  const header = ['latitude', 'longitude', 'timestamp', ...(withHeading ? ['heading'] : []), ...(withSpeed ? ['speed_kmh'] : [])];
+  const rows = points.map((p) =>
+    [
+      p.lat.toFixed(6),
+      p.lng.toFixed(6),
+      new Date(p.ts).toISOString(),
+      ...(withHeading ? [String(Number((p.heading as number).toFixed(1)))] : []),
+      ...(withSpeed ? [String(Number((p.speedKph as number).toFixed(1)))] : []),
+    ].join(','),
+  );
+  return `${header.join(',')}\n${rows.join('\n')}\n`;
+}
+
+/** One route-matching request for a chunk of the trace, asking for the SPEED_LIMITS_FCn layer. */
+export function buildHereTraceRequest(points: HereTracePoint[], apiKey: string): { url: string; init: RequestInit } {
+  const params = new URLSearchParams({
+    apikey: apiKey,
+    routeMatch: '1',
+    mode: 'fastest;car;traffic:disabled',
+    attributes: 'SPEED_LIMITS_FCn(*)',
+  });
+  return {
+    url: `${HERE_ROUTE_MATCH_URL}?${params.toString()}`,
+    init: { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: buildHereTraceCsv(points) },
+  };
+}
+
+/**
+ * The posted limit for the direction the link was driven: a positive link id
+ * is driven away from the reference node (FROM_REF_SPEED_LIMIT), a negative
+ * one towards it (TO_REF_SPEED_LIMIT). The other direction answers when the
+ * driven one is empty. UNIT 'M' converts mph to km/h.
+ */
+export function hereLinkSpeedLimit(link: HereLink): number | null {
+  const towardsRef = String(link.linkId ?? '').trim().startsWith('-');
+  for (const row of link.attributes?.SPEED_LIMITS_FCN ?? []) {
+    const driven = towardsRef ? row.TO_REF_SPEED_LIMIT : row.FROM_REF_SPEED_LIMIT;
+    const other = towardsRef ? row.FROM_REF_SPEED_LIMIT : row.TO_REF_SPEED_LIMIT;
+    const limit = hereLimitValue(driven) ?? hereLimitValue(other);
+    if (limit === null) continue;
+    return String(row.UNIT ?? 'K').toUpperCase() === 'M' ? Math.round(limit * 1.60934) : limit;
+  }
+  return null;
+}
+
+const absLinkId = (id: string | number | undefined): string => String(id ?? '').trim().replace(/^[-+]/, '');
+
+/**
+ * Maps every sent trace point to its matched link. HERE returns one matched
+ * waypoint per trace point (TracePoint: `routeLinkSeqNrMatched` indexes the
+ * route's links across legs, `linkId`, `confidenceValue`, `timestamp` echoed in
+ * ms). When the waypoint count equals the point count they pair by order;
+ * otherwise by echoed timestamp; a point with no waypoint is unmatched.
+ */
+export function parseHereTraceResponse(data: HereRouteMatchResponse, points: Array<{ ts: number }>): HereTraceMatch[] {
+  const route = (data.response?.route ?? data.route ?? [])[0];
+  const unmatched = (): HereTraceMatch => ({ matched: false, speedLimitKph: null });
+  if (!route) return points.map(unmatched);
+  const links = (route.leg ?? []).flatMap((leg) => leg.link ?? []);
+  const byId = new Map<string, HereLink>();
+  for (const link of links) if (!byId.has(absLinkId(link.linkId))) byId.set(absLinkId(link.linkId), link);
+  const waypoints = route.waypoint ?? [];
+  let pick: (i: number) => HereWaypoint | undefined;
+  if (waypoints.length === points.length) {
+    pick = (i) => waypoints[i];
+  } else {
+    const byTs = new Map<number, HereWaypoint>();
+    for (const w of waypoints) if (typeof w.timestamp === 'number' && w.timestamp > 0 && !byTs.has(w.timestamp)) byTs.set(w.timestamp, w);
+    pick = (i) => byTs.get(points[i].ts);
+  }
+  return points.map((_, i) => {
+    const w = pick(i);
+    if (!w) return unmatched();
+    const seq = w.routeLinkSeqNrMatched;
+    const link =
+      (typeof seq === 'number' && seq >= 0 && seq < links.length ? links[seq] : undefined) ??
+      (w.linkId !== undefined ? byId.get(absLinkId(w.linkId)) : undefined);
+    if (!link) return unmatched();
+    return {
+      matched: true,
+      speedLimitKph: hereLinkSpeedLimit(link),
+      linkId: String(link.linkId ?? w.linkId),
+      ...(typeof w.confidenceValue === 'number' ? { confidence: w.confidenceValue } : {}),
+    };
+  });
+}
+
+export interface TraceChunk {
+  /** Points sent: [start, end). */
+  start: number;
+  end: number;
+  /** Points this chunk answers for: [ownFrom, ownTo); the owned ranges partition [0, n). */
+  ownFrom: number;
+  ownTo: number;
+}
+
+/**
+ * Splits n points into chunks of `chunkPoints` that share `overlapPoints`
+ * with their neighbour (capped below half a chunk). Each shared stretch is
+ * split down the middle: its first half is answered by the earlier chunk, the
+ * rest by the later one, so every answered point has context on both sides.
+ */
+export function planTraceChunks(n: number, chunkPoints: number, overlapPoints: number): TraceChunk[] {
+  if (n <= 0) return [];
+  const size = Math.max(2, Math.floor(chunkPoints));
+  const overlap = Math.min(Math.max(0, Math.floor(overlapPoints)), Math.floor((size - 1) / 2));
+  const starts = [0];
+  while (starts[starts.length - 1] + size < n) starts.push(starts[starts.length - 1] + size - overlap);
+  return starts.map((start, k) => ({
+    start,
+    end: Math.min(start + size, n),
+    ownFrom: k === 0 ? 0 : start + Math.floor(overlap / 2),
+    ownTo: k === starts.length - 1 ? n : starts[k + 1] + Math.floor(overlap / 2),
+  }));
+}
+
+/** Great-circle distance in metres. */
+export function haversineM(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const rad = Math.PI / 180;
+  const dLat = (bLat - aLat) * rad;
+  const dLng = (bLng - aLng) * rad;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(aLat * rad) * Math.cos(bLat * rad) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371008.8 * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
 // --- OSM (Overpass) ---------------------------------------------------------------
@@ -611,9 +839,9 @@ function countsText(provider: string, c: Counters): string {
  * failed share may not exceed `ratio`; below that sample size only a run in
  * which every lookup failed trips it (checked at the end of the input).
  */
-function errorBudgetExceeded(c: Counters, ratio: number, final: boolean): boolean {
+function errorBudgetExceeded(c: Counters, ratio: number, final: boolean, minLookups = MIN_LOOKUPS_FOR_ERROR_RATIO): boolean {
   if (c.errors === 0 || c.requests === 0) return false;
-  if (c.requests >= MIN_LOOKUPS_FOR_ERROR_RATIO) return c.errors / c.requests > ratio;
+  if (c.requests >= minLookups) return c.errors / c.requests > ratio;
   return final && c.errors === c.requests;
 }
 
@@ -635,7 +863,23 @@ export const executor = async function* connectorThirdParty(
     stats: { retries: 0 },
   };
 
+  const label = cfg.lookupMode === 'trace' ? `${provider} (trace)` : provider;
+  let traceNote = '';
+
   try {
+    if (cfg.lookupMode === 'trace') {
+      if (provider !== 'here') {
+        throw new Error(
+          `lookupMode 'trace' supports provider 'here' only (got '${provider}'); use lookupMode 'point' for ${provider}`,
+        );
+      }
+      if (ctx.mode === 'live') {
+        throw new Error(
+          "lookupMode 'trace' collects the whole input before matching it, so it runs in batch and simulation runs only; " +
+            "use lookupMode 'point' in live runs",
+        );
+      }
+    }
     // Org key when set, else platform key, else the seam's clear failure
     // (resolution order lives in the secrets seam); OSM skips the chain entirely.
     let apiKey: string | null = null;
@@ -654,7 +898,9 @@ export const executor = async function* connectorThirdParty(
       http: ctx.http,
       throttle,
       retry: cfg.retry,
-      timeoutMs: cfg.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      timeoutMs:
+        cfg.requestTimeoutMs ??
+        (cfg.lookupMode === 'trace' ? DEFAULT_TRACE_REQUEST_TIMEOUT_MS : DEFAULT_REQUEST_TIMEOUT_MS),
       osmEndpoint: cfg.osmEndpoint,
       stats: c.stats,
     };
@@ -662,8 +908,8 @@ export const executor = async function* connectorThirdParty(
     const cache = new Map<string, CacheEntry>();
     const ttlMs = cfg.cacheTtlSeconds * 1000;
     let lastError = '';
-    const checkErrorBudget = (final: boolean): void => {
-      if (!errorBudgetExceeded(c, cfg.maxErrorRatio, final)) return;
+    const checkErrorBudget = (final: boolean, minLookups?: number): void => {
+      if (!errorBudgetExceeded(c, cfg.maxErrorRatio, final, minLookups)) return;
       throw new Error(
         `Speed-limit lookups failing too often (${c.errors}/${c.requests} > maxErrorRatio ${cfg.maxErrorRatio})` +
           (lastError ? `; last: ${lastError}` : ''),
@@ -697,6 +943,109 @@ export const executor = async function* connectorThirdParty(
       c.nullRecords += 1;
       return { ch: 'json' as const, ts, payload: { ts, speedLimitKph: null, source: provider, reason } };
     };
+
+    if (cfg.lookupMode === 'trace') {
+      // Collect the input (safe in batch runs with elastic channels, or a
+      // channelCapacity above the sample count; see the trace-mode notes in
+      // the CHANGELOG), match it chunk by chunk, then emit one record per
+      // sample in ts order.
+      const samples: TelemetrySample[] = [];
+      for await (const sample of telemetrySamples(requireInput(inputs, 'positions'))) samples.push(sample);
+      samples.sort((a, b) => a.ts - b.ts);
+
+      const kept: HereTracePoint[] = [];
+      const keptOf: Array<number | null> = samples.map((sample) => {
+        const lat = sample.signals['gps.latitude'] ?? sample.signals['gps.lat'];
+        const lng = sample.signals['gps.longitude'] ?? sample.signals['gps.lon'];
+        if (typeof lat !== 'number' || typeof lng !== 'number') return null;
+        const last = kept[kept.length - 1];
+        if (last && cfg.traceMinSpacingM > 0 && haversineM(last.lat, last.lng, lat, lng) < cfg.traceMinSpacingM) {
+          return kept.length - 1;
+        }
+        const heading = sample.signals['gps.heading'] ?? sample.signals['gps.course'];
+        const speedKph = sample.signals['gps.speed'];
+        kept.push({
+          lat,
+          lng,
+          ts: sample.ts,
+          ...(typeof heading === 'number' ? { heading } : {}),
+          ...(typeof speedKph === 'number' ? { speedKph } : {}),
+        });
+        return kept.length - 1;
+      });
+
+      const answers: Array<HereTraceMatch | 'capped' | 'error'> = new Array(kept.length).fill('capped');
+      const chunks = planTraceChunks(kept.length, cfg.traceChunkPoints, cfg.traceOverlapPoints);
+      for (const chunk of chunks) {
+        if (c.requests >= cfg.maxLookupsPerRun) break; // the rest stay 'capped'
+        c.requests += 1;
+        const points = kept.slice(chunk.start, chunk.end);
+        let matches: HereTraceMatch[] | 'error';
+        try {
+          const out = await requestWithPolicy({
+            http: deps.http,
+            throttle: deps.throttle,
+            retry: deps.retry,
+            timeoutMs: deps.timeoutMs,
+            stats: deps.stats,
+            label: 'HERE',
+            build: () => buildHereTraceRequest(points, apiKey ?? ''),
+          });
+          if (out.status === 401 || out.status === 403) {
+            throw new ConnectorFatalError(`HERE rejected the API key (HTTP ${out.status}): ${snippet(out.text)}`);
+          }
+          if (!out.ok) {
+            throw new ConnectorLookupError(
+              `HERE trace request failed (HTTP ${out.status}${attemptsNote(out.attempts)}, ` +
+                `points ${chunk.start}-${chunk.end - 1}): ${snippet(out.text)}`,
+            );
+          }
+          matches = parseHereTraceResponse(parseJson<HereRouteMatchResponse>(out.text, 'HERE'), points);
+        } catch (err) {
+          if (!(err instanceof ConnectorLookupError) || cfg.onLookupError === 'fail') throw err;
+          c.errors += 1;
+          lastError = err.message;
+          ctx.log(`trace chunk failed, skipped: ${err.message}`);
+          matches = 'error';
+        }
+        for (let i = chunk.ownFrom; i < chunk.ownTo; i++) {
+          answers[i] = matches === 'error' ? 'error' : matches[i - chunk.start];
+        }
+      }
+      checkErrorBudget(true, 1);
+
+      let matchedPoints = 0;
+      for (const a of answers) if (a !== 'capped' && a !== 'error' && a.matched) matchedPoints += 1;
+      traceNote = `, ${matchedPoints}/${kept.length} trace point(s) matched in ${chunks.length} chunk(s)`;
+
+      for (let i = 0; i < samples.length; i++) {
+        const ts = samples[i].ts;
+        const k = keptOf[i];
+        if (k === null) {
+          c.skippedNoPosition += 1;
+          c.nullRecords += 1;
+          yield { ch: 'json' as const, ts, payload: { ts, speedLimitKph: null, source: provider, matched: false, reason: 'no_position' } };
+          continue;
+        }
+        const a = answers[k];
+        if (a === 'capped' || a === 'error') {
+          if (a === 'capped') c.skippedByCap += 1;
+          c.nullRecords += 1;
+          yield { ch: 'json' as const, ts, payload: { ts, speedLimitKph: null, source: provider, matched: false, reason: a } };
+          continue;
+        }
+        const link = a.linkId !== undefined ? { linkId: a.linkId } : {};
+        if (a.speedLimitKph === null) {
+          c.noCoverage += 1;
+          c.nullRecords += 1;
+          yield { ch: 'json' as const, ts, payload: { ts, speedLimitKph: null, source: provider, ...link, matched: a.matched, reason: 'no_answer' } };
+          continue;
+        }
+        c.emitted += 1;
+        yield { ch: 'json' as const, ts, payload: { ts, speedLimitKph: a.speedLimitKph, source: provider, ...link, matched: true } };
+      }
+      return;
+    }
 
     for await (const sample of telemetrySamples(requireInput(inputs, 'positions'))) {
       // Accept both position namings: devices emit gps.lat/gps.lon, older demo
@@ -739,8 +1088,8 @@ export const executor = async function* connectorThirdParty(
   } catch (err) {
     // Carry the counts on the failure: the step row shows the error, not the summary.
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`${message} [${countsText(provider, c)}]`);
+    throw new Error(`${message} [${countsText(label, c)}${traceNote}]`);
   } finally {
-    ctx.setSummary(countsText(provider, c));
+    ctx.setSummary(countsText(label, c) + traceNote);
   }
 };

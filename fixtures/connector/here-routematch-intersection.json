@@ -1,0 +1,362 @@
+{
+ "response": {
+  "route": [
+   {
+    "mode": {
+     "type": "fastest",
+     "transportModes": [
+      "car"
+     ],
+     "trafficMode": "disabled"
+    },
+    "waypoint": [
+     {
+      "linkId": "+1197711001",
+      "routeLinkSeqNrMatched": 0,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.531085
+      },
+      "originalPosition": {
+       "latitude": 43.66099,
+       "longitude": -79.531085
+      },
+      "matchDistance": 1.1,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269400000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "+1197711001",
+      "routeLinkSeqNrMatched": 0,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.53093
+      },
+      "originalPosition": {
+       "latitude": 43.66102,
+       "longitude": -79.53093
+      },
+      "matchDistance": 2.2,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269401000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "+1197711001",
+      "routeLinkSeqNrMatched": 0,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.530775
+      },
+      "originalPosition": {
+       "latitude": 43.66099,
+       "longitude": -79.530775
+      },
+      "matchDistance": 1.1,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269402000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "+1197711001",
+      "routeLinkSeqNrMatched": 0,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.53062
+      },
+      "originalPosition": {
+       "latitude": 43.66102,
+       "longitude": -79.53062
+      },
+      "matchDistance": 2.2,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269403000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "+1197711001",
+      "routeLinkSeqNrMatched": 0,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.530465
+      },
+      "originalPosition": {
+       "latitude": 43.66099,
+       "longitude": -79.530465
+      },
+      "matchDistance": 1.1,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269404000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "+1197711001",
+      "routeLinkSeqNrMatched": 0,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.53031
+      },
+      "originalPosition": {
+       "latitude": 43.66102,
+       "longitude": -79.53031
+      },
+      "matchDistance": 2.2,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269405000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "+1197711001",
+      "routeLinkSeqNrMatched": 0,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.530155
+      },
+      "originalPosition": {
+       "latitude": 43.66099,
+       "longitude": -79.530155
+      },
+      "matchDistance": 1.1,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269406000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "-1197711002",
+      "routeLinkSeqNrMatched": 1,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.53
+      },
+      "originalPosition": {
+       "latitude": 43.66102,
+       "longitude": -79.53
+      },
+      "matchDistance": 2.2,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269407000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "-1197711002",
+      "routeLinkSeqNrMatched": 1,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.529845
+      },
+      "originalPosition": {
+       "latitude": 43.66099,
+       "longitude": -79.529845
+      },
+      "matchDistance": 1.1,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269408000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "-1197711002",
+      "routeLinkSeqNrMatched": 1,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.52969
+      },
+      "originalPosition": {
+       "latitude": 43.66102,
+       "longitude": -79.52969
+      },
+      "matchDistance": 2.2,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269409000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "-1197711002",
+      "routeLinkSeqNrMatched": 1,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.529535
+      },
+      "originalPosition": {
+       "latitude": 43.66099,
+       "longitude": -79.529535
+      },
+      "matchDistance": 1.1,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269410000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "-1197711002",
+      "routeLinkSeqNrMatched": 1,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.52938
+      },
+      "originalPosition": {
+       "latitude": 43.66102,
+       "longitude": -79.52938
+      },
+      "matchDistance": 2.2,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269411000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "-1197711002",
+      "routeLinkSeqNrMatched": 1,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.529225
+      },
+      "originalPosition": {
+       "latitude": 43.66099,
+       "longitude": -79.529225
+      },
+      "matchDistance": 1.1,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269412000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "-1197711002",
+      "routeLinkSeqNrMatched": 1,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.52907
+      },
+      "originalPosition": {
+       "latitude": 43.66102,
+       "longitude": -79.52907
+      },
+      "matchDistance": 2.2,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269413000,
+      "spot": 0.5
+     },
+     {
+      "linkId": "-1197711002",
+      "routeLinkSeqNrMatched": 1,
+      "confidenceValue": 0.93,
+      "mappedPosition": {
+       "latitude": 43.661,
+       "longitude": -79.528915
+      },
+      "originalPosition": {
+       "latitude": 43.66099,
+       "longitude": -79.528915
+      },
+      "matchDistance": 1.1,
+      "headingDegreeNorthClockwise": 90.0,
+      "headingMatched": 90.0,
+      "speedMps": 12.5,
+      "timestamp": 1792269414000,
+      "spot": 0.5
+     }
+    ],
+    "leg": [
+     {
+      "length": 222,
+      "travelTime": 18,
+      "link": [
+       {
+        "linkId": "+1197711001",
+        "functionalClass": 3,
+        "confidence": 0.98,
+        "length": 118.4,
+        "shape": [
+         43.661,
+         -79.53134,
+         43.661,
+         -79.53
+        ],
+        "attributes": {
+         "SPEED_LIMITS_FCN": [
+          {
+           "LINK_ID": "1197711001",
+           "FROM_REF_SPEED_LIMIT": "50",
+           "TO_REF_SPEED_LIMIT": "50",
+           "SOURCE": "1",
+           "UNIT": "K"
+          }
+         ]
+        }
+       },
+       {
+        "linkId": "-1197711002",
+        "functionalClass": 3,
+        "confidence": 0.97,
+        "length": 104.1,
+        "shape": [
+         43.661,
+         -79.53,
+         43.661,
+         -79.52887
+        ],
+        "attributes": {
+         "SPEED_LIMITS_FCN": [
+          {
+           "LINK_ID": "1197711002",
+           "FROM_REF_SPEED_LIMIT": "30",
+           "TO_REF_SPEED_LIMIT": "50",
+           "SOURCE": "1",
+           "UNIT": "K"
+          }
+         ]
+        }
+       }
+      ]
+     }
+    ],
+    "summary": {
+     "distance": 222,
+     "travelTime": 18
+    }
+   }
+  ],
+  "warnings": [],
+  "language": "en-us"
+ }
+}

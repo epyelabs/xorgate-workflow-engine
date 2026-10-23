@@ -300,6 +300,151 @@ async function comparator(config, references, signals) {
 // =============================== P1.1 (trace mode) ======================================
 // (appended below)
 
+/** Synthetic HERE: one link per matched point; link ids carry the chunk number and point index. */
+function mockHere({ unmatched = () => false, limitFor = () => 50, bodies = [], urls = [], fail = () => null } = {}) {
+  let chunkNo = 0;
+  return async (url, init) => {
+    const body = String(init.body);
+    bodies.push(body);
+    urls.push(String(url));
+    const k = chunkNo++;
+    const failure = fail(k);
+    if (failure) return failure;
+    const [, ...lines] = body.trim().split('\n');
+    const pts = lines.map((l) => { const [lat, lon, iso] = l.split(','); return { lat: Number(lat), lon: Number(lon), ts: Date.parse(iso) }; });
+    const links = [];
+    const waypoint = [];
+    pts.forEach((p, i) => {
+      if (unmatched(p)) return;
+      const linkId = `+c${k}p${i}`;
+      const limit = limitFor(p);
+      links.push({ linkId, attributes: { SPEED_LIMITS_FCN: limit === null ? [] : [{ FROM_REF_SPEED_LIMIT: String(limit), TO_REF_SPEED_LIMIT: '0', UNIT: 'K' }] } });
+      waypoint.push({ linkId, routeLinkSeqNrMatched: links.length - 1, timestamp: p.ts, confidenceValue: 0.9 });
+    });
+    return json({ response: { route: [{ waypoint, leg: [{ link: links }] }], warnings: [] } });
+  };
+}
+const traceCfg = (extra = {}) => ({ provider: 'here', lookupMode: 'trace', ...extra });
+const csvSamples = (p) => {
+  const [head, ...lines] = readFileSync(join(root, p), 'utf8').trim().split('\n');
+  const cols = head.split(',');
+  return lines.map((l) => { const v = l.split(',').map(Number); return { ts: v[0], signals: Object.fromEntries(cols.slice(1).map((c, i) => [c, v[i + 1]])) }; });
+};
+
+// --- request shape and the intersection fixture -------------------------------------
+{
+  const tpl = readJson('fixtures/templates/overspeed-here-trace.json');
+  const fixture = readJson('fixtures/connector/here-routematch-intersection.json');
+  const samples = csvSamples('fixtures/telemetry/intersection-trace.csv');
+  const bodies = [];
+  const urls = [];
+  const inits = [];
+  useVirtualClock();
+  const r = await run(tpl, samples, async (url, init) => { urls.push(String(url)); bodies.push(String(init.body)); inits.push(init); return json(fixture); }, { channelCapacity: BIG_CAPACITY });
+  realClock();
+  const u = new URL(urls[0] ?? 'http://x/');
+  const rows = (bodies[0] ?? '').trim().split('\n');
+  check('trace request: one POST to /v8/match/routelinks with apikey, routeMatch=1, car mode and SPEED_LIMITS_FCn(*), text/plain body', urls.length === 1 && u.origin + u.pathname === 'https://routematching.hereapi.com/v8/match/routelinks' && u.searchParams.get('routeMatch') === '1' && u.searchParams.get('mode') === 'fastest;car;traffic:disabled' && u.searchParams.get('attributes') === 'SPEED_LIMITS_FCn(*)' && u.searchParams.has('apikey') && inits[0].method === 'POST' && inits[0].headers['Content-Type'] === 'text/plain', urls[0]);
+  check('trace request: CSV trace latitude,longitude,timestamp,heading,speed_kmh with ISO 8601 UTC timestamps, one row per sample', rows[0] === 'latitude,longitude,timestamp,heading,speed_kmh' && rows.length === 16 && rows[1] === '43.660990,-79.531085,2026-10-17T20:36:40.000Z,90,45', rows.slice(0, 2).join(' | '));
+  const recs = r.records;
+  check('trace intersection fixture: 15 records in ts order, every one matched to the arterial at 50 (no side-street flip to 30, direction-aware FROM/TO pick)', r.outcome.status === 'succeeded' && recs.length === 15 && recs.every((x, i) => x.ts === samples[i].ts && x.speedLimitKph === 50 && x.matched === true && x.source === 'here') && recs.slice(0, 7).every((x) => x.linkId === '+1197711001') && recs.slice(7).every((x) => x.linkId === '-1197711002'), `${r.outcome.error} ${JSON.stringify(recs.map((x) => [x.speedLimitKph, x.linkId]))}`);
+  check('trace intersection fixture: comparator at 1 Hz true on 0/15, no event; summary names the trace', /^true on 0\/15 samples/.test(r.step('cmp').output) && r.outcome.events.length === 0 && /^15 speed-limit record\(s\) via here \(trace\), 1 lookup\(s\), 15\/15 trace point\(s\) matched in 1 chunk\(s\)$/.test(r.step('roads').output), `${r.step('cmp').output} | ${r.step('roads').output}`);
+  check('parseHereTraceResponse reads a top-level route (OpenAPI shape) like the response wrapper', JSON.stringify(conn.parseHereTraceResponse(fixture.response, samples)) === JSON.stringify(conn.parseHereTraceResponse(fixture, samples)));
+  check('hereLinkSpeedLimit: mph rows convert, 0 / 999 are no limit, the other direction answers when the driven one is empty', conn.hereLinkSpeedLimit({ linkId: '7', attributes: { SPEED_LIMITS_FCN: [{ FROM_REF_SPEED_LIMIT: '35', UNIT: 'M' }] } }) === 56 && conn.hereLinkSpeedLimit({ linkId: '7', attributes: { SPEED_LIMITS_FCN: [{ FROM_REF_SPEED_LIMIT: '999', TO_REF_SPEED_LIMIT: '0' }] } }) === null && conn.hereLinkSpeedLimit({ linkId: '-7', attributes: { SPEED_LIMITS_FCN: [{ FROM_REF_SPEED_LIMIT: '60', TO_REF_SPEED_LIMIT: null }] } }) === 60);
+}
+
+// --- chunk boundaries with overlap ------------------------------------------------------
+{
+  const plan = conn.planTraceChunks(25, 10, 4);
+  check('planTraceChunks(25, 10, 4): sends [0,10) [6,16) [12,22) [18,25), answers [0,8) [8,14) [14,20) [20,25)', JSON.stringify(plan.map((c) => [c.start, c.end, c.ownFrom, c.ownTo])) === JSON.stringify([[0, 10, 0, 8], [6, 16, 8, 14], [12, 22, 14, 20], [18, 25, 20, 25]]), JSON.stringify(plan));
+  check('planTraceChunks: overlap is capped below half a chunk; one chunk when n fits; none for n 0', JSON.stringify(conn.planTraceChunks(10, 4, 50).map((c) => [c.start, c.end])) === JSON.stringify([[0, 4], [3, 7], [6, 10]]) && conn.planTraceChunks(1000, 1000, 10).length === 1 && conn.planTraceChunks(0, 10, 2).length === 0);
+  useVirtualClock();
+  const bodies = [];
+  const samples = drive(25);
+  const r = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 4 })), samples, mockHere({ bodies }), { channelCapacity: BIG_CAPACITY });
+  realClock();
+  const firstTs = bodies.map((b) => Date.parse(b.split('\n')[1].split(',')[2]) - samples[0].ts);
+  const sizes = bodies.map((b) => b.trim().split('\n').length - 1);
+  const owner = r.records.map((x) => x.linkId);
+  const expected = samples.map((_, j) => { const k = j < 8 ? 0 : j < 14 ? 1 : j < 20 ? 2 : 3; return `+c${k}p${j - [0, 6, 12, 18][k]}`; });
+  check('trace chunks: 4 requests whose bodies start at samples 0, 6, 12, 18 (overlap re-sent) with 10, 10, 10, 7 points', bodies.length === 4 && JSON.stringify(firstTs) === JSON.stringify([0, 6000, 12000, 18000]) && JSON.stringify(sizes) === JSON.stringify([10, 10, 10, 7]), `${firstTs} / ${sizes}`);
+  check('trace chunks: every sample answered exactly once, in ts order, by the chunk that owns it (overlap split down the middle)', r.outcome.status === 'succeeded' && r.records.length === 25 && r.records.every((x, i) => x.ts === samples[i].ts) && JSON.stringify(owner) === JSON.stringify(expected), JSON.stringify(owner));
+}
+
+// --- unmatched points and samples without a position give null ---------------------------
+{
+  useVirtualClock();
+  const samples = drive(20);
+  samples[15] = { ts: samples[15].ts, signals: { 'gps.speed': 50 } }; // no position
+  const lat5 = samples[5].signals['gps.lat'];
+  const lat9 = samples[9].signals['gps.lat'];
+  const r = await run(connectorGraph(traceCfg()), samples, mockHere({ unmatched: (p) => p.lat >= lat5 - 1e-7 && p.lat <= lat9 + 1e-7, limitFor: (p) => (p.lat > samples[17].signals['gps.lat'] - 1e-7 ? null : 60) }), { channelCapacity: BIG_CAPACITY });
+  realClock();
+  const shape = r.records.map((x) => (x.speedLimitKph === null ? `${x.reason}:${x.matched}` : x.speedLimitKph)).join(',');
+  const want = [...Array(5).fill(60), ...Array(5).fill('no_answer:false'), ...Array(5).fill(60), 'no_position:false', 60, 'no_answer:true', 'no_answer:true', 'no_answer:true'].join(',');
+  check('trace unmatched: points HERE did not match (fewer waypoints, paired by timestamp) and samples without a position emit null; a matched link without a limit is null with matched true', r.outcome.status === 'succeeded' && r.records.length === 20 && shape === want, shape);
+  check('trace unmatched: the summary counts matched points and null records', /^11 speed-limit record\(s\) via here \(trace\), 1 lookup\(s\), 9 null record\(s\), 8 without coverage.*, 1 without position, 14\/19 trace point\(s\) matched in 1 chunk\(s\)$/.test(r.step('roads').output), r.step('roads').output);
+}
+
+// --- the 429 path, chunk failures and the request cap --------------------------------------
+{
+  const clock = useVirtualClock();
+  let n = 0;
+  const here = mockHere();
+  const r = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 2 })), drive(18), (url, init) => (++n === 1 ? json({ error: 'Too Many Requests' }, 429, { 'Retry-After': '1' }) : here(url, init)), { channelCapacity: BIG_CAPACITY });
+  realClock();
+  check('trace 429: the first chunk is retried after Retry-After 1 s, then both chunks answer', r.outcome.status === 'succeeded' && n === 3 && clock.sleeps.includes(1000) && r.records.length === 18 && r.records.every((x) => x.matched) && /, 2 lookup\(s\), 1 retry/.test(r.step('roads').output), `${r.outcome.error} | ${r.step('roads').output} | ${clock.sleeps}`);
+}
+{
+  useVirtualClock();
+  const failMid = (k) => (k === 1 ? json({ error: 'boom' }, 500) : null);
+  const ok = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 0, onLookupError: 'skip', maxErrorRatio: 0.5, retry: { attempts: 1 } })), drive(30), mockHere({ fail: failMid }), { channelCapacity: BIG_CAPACITY });
+  const shape = ok.records.map((x) => (x.speedLimitKph === null ? x.reason : 'ok'));
+  check('trace chunk failure with skip: the run stays green, the failed chunk\'s samples are null (reason error)', ok.outcome.status === 'succeeded' && shape.length === 30 && shape.slice(10, 20).every((x) => x === 'error') && shape.slice(0, 10).concat(shape.slice(20)).every((x) => x === 'ok'), `${ok.outcome.error} ${shape}`);
+  const tripped = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 0, onLookupError: 'skip', retry: { attempts: 1 } })), drive(30), mockHere({ fail: failMid }), { channelCapacity: BIG_CAPACITY });
+  check('trace chunk failure with skip: 1 of 3 chunks > maxErrorRatio 0.2 fails the node at the end', tripped.outcome.status === 'failed' && /failing too often \(1\/3 > maxErrorRatio 0\.2\)/.test(tripped.outcome.error), tripped.outcome.error);
+  const failed = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 0, retry: { attempts: 1 } })), drive(30), mockHere({ fail: failMid }), { channelCapacity: BIG_CAPACITY });
+  check('trace chunk failure with fail (default): the node fails naming the chunk', failed.outcome.status === 'failed' && /HERE trace request failed \(HTTP 500, points 10-19\)/.test(failed.outcome.error), failed.outcome.error);
+  const bodies = [];
+  const capped = await run(connectorGraph(traceCfg({ traceChunkPoints: 10, traceOverlapPoints: 4, maxLookupsPerRun: 2 })), drive(25), mockHere({ bodies }), { channelCapacity: BIG_CAPACITY });
+  const reasons = capped.records.map((x) => x.reason ?? 'ok');
+  check('trace cap: maxLookupsPerRun counts requests; samples owned by unsent chunks are null (reason capped)', capped.outcome.status === 'succeeded' && bodies.length === 2 && reasons.slice(0, 14).every((x) => x === 'ok') && reasons.slice(14).every((x) => x === 'capped') && /11 skipped by lookup cap/.test(capped.step('roads').output), `${reasons} | ${capped.step('roads').output}`);
+  realClock();
+}
+
+// --- decimation of stationary points -----------------------------------------------------
+{
+  useVirtualClock();
+  const parked = Array.from({ length: 10 }, (_, i) => ({ ts: 1_792_000_000_000 + i * 1000, signals: { 'gps.lat': 43.65 + (i % 2) * 0.00001, 'gps.lon': -79.5, 'gps.speed': 0 } }));
+  const moving = drive(10, { t0: 1_792_000_010_000, lat0: 43.6502 });
+  const bodies = [];
+  const r = await run(connectorGraph(traceCfg({ traceMinSpacingM: 5 })), [...parked, ...moving], mockHere({ bodies }), { channelCapacity: BIG_CAPACITY });
+  realClock();
+  const sent = bodies[0].trim().split('\n').length - 1;
+  check('traceMinSpacingM 5: ten parked samples (1 m jitter) are sent as one point and all take its answer; moving samples are all sent', r.outcome.status === 'succeeded' && sent === 11 && r.records.length === 20 && r.records.slice(0, 10).every((x) => x.linkId === '+c0p0') && new Set(r.records.slice(10).map((x) => x.linkId)).size === 10, `sent=${sent} ${JSON.stringify(r.records.map((x) => x.linkId))}`);
+}
+
+// --- where trace mode does not run ---------------------------------------------------------
+{
+  const live = await run(connectorGraph(traceCfg()), drive(3), mockHere(), { mode: 'live' });
+  check('trace in a live run fails at start with a clear message (batch and simulation only)', live.outcome.status === 'failed' && /lookupMode 'trace' collects the whole input before matching it, so it runs in batch and simulation runs only/.test(live.outcome.error), live.outcome.error);
+  const osm = await run(connectorGraph({ provider: 'osm', lookupMode: 'trace' }), drive(3), mockHere());
+  check('trace with a provider other than HERE fails at start', osm.outcome.status === 'failed' && /supports provider 'here' only \(got 'osm'\)/.test(osm.outcome.error), osm.outcome.error);
+}
+
+// --- a 1 h drive, production-shaped graph, mocked HERE ---------------------------------------
+{
+  const tpl = readJson('fixtures/templates/overspeed-here-trace.json');
+  // 3600 samples at 1 Hz; 60 km/h for two minutes in every ten (limit 50), else 40.
+  const samples = Array.from({ length: 3600 }, (_, s) => ({ ts: 1_792_000_000_000 + s * 1000, signals: { 'gps.lat': 43.6 + s * 0.00011, 'gps.lon': -79.5, 'gps.speed': s % 600 < 120 ? 60 : 40, 'gps.heading': 0 } }));
+  const bodies = [];
+  const started = Date.now();
+  const r = await run(tpl, samples, mockHere({ bodies }), { channelCapacity: BIG_CAPACITY });
+  const ms = Date.now() - started;
+  console.log(`     (1 h trace drive wall time: ${ms} ms)`);
+  check('1 h drive (3600 samples): 4 chunk requests instead of ~360 point lookups, 3600 records, 6 overspeed events, well under 5 s', r.outcome.status === 'succeeded' && bodies.length === 4 && r.records.length === 3600 && r.outcome.events.length === 6 && ms < 5000, `${ms} ms, ${bodies.length} requests, ${r.records.length} records, ${r.outcome.events.length} events, ${r.outcome.error}`);
+}
+
 if (failed) {
   console.error('connector-test: FAILED');
   process.exit(1);

@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 2,
+  "nodes": [
+    {
+      "id": "src",
+      "type": "source.telemetry",
+      "position": {
+        "x": 40,
+        "y": 120
+      },
+      "data": {
+        "label": "Speed + position",
+        "config": {
+          "metrics": [
+            "gps.speed",
+            "gps.lat",
+            "gps.lon",
+            "gps.heading"
+          ]
+        }
+      }
+    },
+    {
+      "id": "roads",
+      "type": "connector.third_party",
+      "position": {
+        "x": 320,
+        "y": 300
+      },
+      "data": {
+        "label": "Speed limit (HERE trace)",
+        "config": {
+          "provider": "here",
+          "lookupMode": "trace",
+          "onLookupError": "skip"
+        }
+      }
+    },
+    {
+      "id": "cmp",
+      "type": "logic.comparator",
+      "position": {
+        "x": 600,
+        "y": 120
+      },
+      "data": {
+        "label": "Speed > limit + 5 (assume 50 without one)",
+        "config": {
+          "signal": "gps.speed",
+          "operator": "gt",
+          "field": "speedLimitKph",
+          "margin": 5,
+          "fallbackReference": 50
+        }
+      }
+    },
+    {
+      "id": "deb",
+      "type": "logic.debounce",
+      "position": {
+        "x": 880,
+        "y": 120
+      },
+      "data": {
+        "label": "Held 10 s",
+        "config": {
+          "minDurationMs": 10000,
+          "cooldownMs": 0
+        }
+      }
+    },
+    {
+      "id": "evt",
+      "type": "output.event",
+      "position": {
+        "x": 1160,
+        "y": 120
+      },
+      "data": {
+        "label": "Overspeed",
+        "config": {
+          "kind": "overspeed",
+          "cooldownSeconds": 60
+        }
+      }
+    },
+    {
+      "id": "cap",
+      "type": "output.data_capture",
+      "position": {
+        "x": 600,
+        "y": 300
+      },
+      "data": {
+        "label": "Speed limits matched",
+        "config": {
+          "format": "jsonl"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_src_roads",
+      "source": "src",
+      "target": "roads",
+      "sourceHandle": "telemetry",
+      "targetHandle": "positions"
+    },
+    {
+      "id": "e_src_cmp",
+      "source": "src",
+      "target": "cmp",
+      "sourceHandle": "telemetry",
+      "targetHandle": "signal"
+    },
+    {
+      "id": "e_roads_cmp",
+      "source": "roads",
+      "target": "cmp",
+      "sourceHandle": "speed_limit",
+      "targetHandle": "reference"
+    },
+    {
+      "id": "e_cmp_deb",
+      "source": "cmp",
+      "target": "deb",
+      "sourceHandle": "condition",
+      "targetHandle": "condition"
+    },
+    {
+      "id": "e_deb_evt",
+      "source": "deb",
+      "target": "evt",
+      "sourceHandle": "condition",
+      "targetHandle": "condition"
+    },
+    {
+      "id": "e_roads_cap",
+      "source": "roads",
+      "target": "cap",
+      "sourceHandle": "speed_limit",
+      "targetHandle": "records"
+    }
+  ]
+}

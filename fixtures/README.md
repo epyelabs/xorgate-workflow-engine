@@ -59,6 +59,7 @@ Published schemaVersion-2 definitions, verbatim from the dev DB
 | `overspeed-webhook.json` | hand-made from `overspeed.json` (0.5.0) | n/a | The local webhook case: `overspeed.json` with `webhook: "dispatch"` on n4 and a second `output.event` n5 (`overspeed_audit`, `webhook: "audit"`) on the same condition. Hermetic; the golden suite binds `dispatch` to a loopback listener and leaves `audit` unbound. |
 | `overspeed-osm.json` | "Overspeed via OSM (scenario 2c demo)" `4daaeb95-e50b-4649-9dab-0fa2d8df7af2` | published v1 | The connector case. NOT for the golden test: it calls public Overpass at run time (real intermittent 429s, see workflow_refactor M7 notes). Kept for manual connector testing. |
 | `overspeed-osm-fallback.json` | hand-made from the Alocate production overspeed graph (`alocate/plans/driver-behaviour/scripts/templates/overspeed-obd.json`, 2026-10) | n/a | The no-answer / fallback case: `source.telemetry` (obd.speed, gps.lat/lon) → `telemetry.resample` (10 s hold) → `connector.third_party` (OSM, `emitNoAnswer`, `onLookupError: skip`) → `logic.comparator` (speed > limit + 5, `fallbackReference` 50, `maxReferenceAgeMs` 5000) → `logic.debounce` 10 s → `output.event`; webhook removed. Run by `test/connector/connector-test.mjs` with Overpass mocked. |
+| `overspeed-here-trace.json` | hand-made (2026-10) | n/a | HERE trace mode: `source.telemetry` (gps.speed/lat/lon/heading) → `connector.third_party` (`lookupMode: trace`, `onLookupError: skip`) → `logic.comparator` reference, with the source also on the comparator's signal (1 Hz, no resample; `fallbackReference` 50) → `logic.debounce` 10 s → `output.event`. Needs elastic batch channels (or a large `channelCapacity`); run by `test/connector/connector-test.mjs` with HERE mocked. |
 
 Grab command (per template id/version):
 
@@ -162,3 +163,16 @@ source bindings:
 The whole committed `fixtures/` tree is under 40 KB. A second clip,
 `video/drive_2.mp4` (7 MB, never committed, no recorded provenance), was
 deleted on 2026-09-04 rather than added to `fixtures.json`.
+
+## Connector fixtures
+
+- `telemetry/intersection-trace.csv`: 15 samples at 1 Hz, 45 km/h, heading 90,
+  driving east through an arterial (50) / side street (30) intersection with a
+  few metres of GPS jitter. Synthetic.
+- `connector/here-routematch-intersection.json`: a recorded-style HERE Route
+  Matching v8 answer for that trace (`response.route[0]` with one `waypoint` per
+  trace point and two arterial links carrying `SPEED_LIMITS_FCN` rows; the
+  second link is driven towards its reference node, so its `TO_REF` 50 applies,
+  not its `FROM_REF` 30). Built from HERE's documented OpenAPI schema
+  (TracePoint / Link fields), not captured from a live call: replace it with a
+  real capture when one is made with the owner's key.
