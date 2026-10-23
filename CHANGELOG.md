@@ -70,6 +70,133 @@ P0.1 + P0.2). The core `catalogVersion` does not move
   32) while a json edge in the same graph buffers; live mode keeps its
   policies.
 
+### Connector and comparator
+
+A minor under `docs/compatibility.md`: additive optional config on
+`connector.third_party` and `logic.comparator`, additive fields on their
+records, new exports from the connector module. The core catalog moves from
+`f8861576c807e382` to `92697a69913738c4` (28 nodes; `4b1a1732646c0e0d` at the P0.3 commit); without `core/function`
+the 26 other defs move from `184300277358e824` to `22138d958ba19520`.
+
+#### Added (P0.3: rate policy, retries, timeouts, error budget, no-answer records)
+
+- `connector.third_party` config, all optional with defaults:
+  - `maxRequestsPerSecond`: token-bucket pacing, burst 1. Default per
+    provider: OSM 1 (plus up to 250 ms jitter, as before), HERE 5, Google
+    Roads 10.
+  - `retry: { attempts: 4, baseMs: 500, maxMs: 8000 }`: retries on HTTP 429
+    and 5xx with full-jitter exponential back-off. A `Retry-After` header
+    (delta-seconds or HTTP-date) is honoured instead, up to 60 s; a longer one
+    ends the lookup's attempts. `attempts` counts the first request.
+  - `requestTimeoutMs` (default 10000): an `AbortSignal` on `ctx.http`, raced
+    so a fetch that ignores the signal still times out; covers the body read.
+  - `onLookupError: 'fail' | 'skip'` (default `fail`) and `maxErrorRatio`
+    (default 0.2). With `skip`, a lookup that still fails after its retries
+    (or times out) is a no-answer for that position; the node fails once the
+    failed share exceeds `maxErrorRatio` after at least 10 lookups, or at the
+    end of the input when every lookup failed. A rejected key (401/403)
+    always fails the node.
+  - `emitNoAnswer` (default false): positions without a limit emit
+    `{ ts, speedLimitKph: null, source, reason }`, `reason` one of
+    `no_answer`, `capped` (past `maxLookupsPerRun`) or `error` (skip path).
+  - `osmEndpoint` (default `https://overpass-api.de/api/interpreter`).
+- `logic.comparator` config `maxReferenceAgeMs` (a held reference older than
+  this is stale) and `fallbackReference` (the value used when there is no
+  usable record: none yet, a null field, or stale; without it such samples are
+  skipped). The condition `meta` gains `referenceSource: 'record' | 'fallback'`
+  and `referenceAgeMs` (sample ts minus the record's ts, null before any
+  record). Together with `emitNoAnswer` this moves Alocate's "held limit,
+  assume 50" rule (driver-behaviour CONTRACT 3.1) into the template: on the
+  M0-P0 stale-limit shape the false events are dropped and real ones are
+  compared against the assumed limit.
+- Connector module exports (deep, not from the root): `RequestThrottle`
+  (now token-bucket: `new RequestThrottle(ratePerSecond, { jitterMs, burst,
+  clock })`), `requestWithPolicy`, `parseRetryAfter`, `backoffDelayMs`,
+  `ConnectorFatalError`, `ConnectorLookupError`, `DEFAULT_REQUESTS_PER_SECOND`,
+  and the internal clock seam `connectorClock` / `resetConnectorClock` used by
+  the tests. `buildOverpassRequest` takes an optional endpoint.
+- Fixture `fixtures/templates/overspeed-osm-fallback.json`: the production
+  overspeed graph (10 s hold grid, OSM) with `emitNoAnswer` + `skip` on the
+  connector and `fallbackReference: 50`, `maxReferenceAgeMs: 5000` on the
+  comparator.
+- `test/connector/connector-test.mjs`, run by `npm test`: pacing on a virtual
+  clock, 429 then success with and without `Retry-After`, a hung fetch hitting
+  the timeout, the skip path and the error budget, `emitNoAnswer`, and the
+  stale-limit scenario on the production graph.
+
+#### Added (P1.1: HERE trace mode)
+
+- `connector.third_party` config `lookupMode: 'point' | 'trace'` (default
+  `point`), with `traceChunkPoints` (default 1000), `traceOverlapPoints`
+  (default 10, capped below half a chunk) and `traceMinSpacingM` (default 0).
+  Trace mode is HERE only: the whole input is collected, points closer than
+  `traceMinSpacingM` to the last kept one are dropped (they take its answer),
+  and the trace is POSTed to Route Matching v8 (`/v8/match/routelinks`,
+  `routeMatch=1`, `mode=fastest;car;traffic:disabled`,
+  `attributes=SPEED_LIMITS_FCn(*)`) as a `text/plain` CSV trace
+  (`latitude,longitude,timestamp` in ISO 8601 UTC, plus `heading` and
+  `speed_kmh` when every point carries `gps.heading`/`gps.course` and
+  `gps.speed`), one request per chunk. Consecutive chunks share
+  `traceOverlapPoints`; each shared point is answered by the chunk where it
+  sits further from the edge. Every matched waypoint is mapped to its link
+  (`routeLinkSeqNrMatched` into the route's links across legs, else by
+  `linkId`; waypoints pair with points by order, or by echoed `timestamp`
+  when HERE returns fewer), and the link's `SPEED_LIMITS_FCN` row gives the
+  limit for the driven direction (positive link id: `FROM_REF_SPEED_LIMIT`,
+  negative: `TO_REF_SPEED_LIMIT`, the other direction when empty; `UNIT: 'M'`
+  converts from mph). The response is read with or without the `response`
+  wrapper.
+- Trace output: one record per input sample, in ts order:
+  `{ ts, speedLimitKph | null, source: 'here', linkId?, matched, reason? }`
+  (`reason` on null records: `no_answer`, `capped`, `error`, or
+  `no_position` for a sample without a position). Nulls are always emitted in
+  trace mode, so the comparator never holds a stale limit.
+- Trace errors: a failed chunk follows `onLookupError` (with `skip` its
+  samples get reason `error`); the error ratio is checked once at the end,
+  with no minimum lookup count. `maxLookupsPerRun` counts chunk requests;
+  samples owned by unsent chunks get reason `capped`. Pacing, retries and
+  `Retry-After` apply per chunk; `requestTimeoutMs` defaults to 30000 per
+  chunk (10000 in point mode).
+- Where it runs: batch and simulation runs. A live run fails the node at
+  start with a clear message (a bounded `traceWindowSeconds` look-ahead would
+  still stall a ts-merging consumer of the same source on bounded live
+  channels, so trace mode is refused there rather than half-supported). A
+  provider other than HERE fails at start too. Collecting the input needs
+  batch channels that never block a fan-out producer: the elastic channels of
+  P0.1, or `EngineRunDeps.channelCapacity` above the sample count. On 0.5.0's
+  bounded channels (32) a graph that also feeds the source into the
+  comparator stalls until the run deadline.
+- Connector module exports: `buildHereTraceCsv`, `buildHereTraceRequest`,
+  `parseHereTraceResponse`, `hereLinkSpeedLimit`, `planTraceChunks`,
+  `haversineM`, and the types `HereTracePoint`, `HereTraceMatch`,
+  `HereLink`, `HereWaypoint`, `HereRoute`, `HereSpeedLimitRow`,
+  `TraceChunk`. `parseHereResponse` (point mode) also reads a top-level
+  `route`.
+- Fixtures: `fixtures/telemetry/intersection-trace.csv` (15 s at 45 km/h
+  through an arterial/side-street intersection), the recorded-style answer
+  `fixtures/connector/here-routematch-intersection.json` (built from HERE's
+  documented schema, not from a live call), and
+  `fixtures/templates/overspeed-here-trace.json` (`src -> roads(trace) ->
+  cmp.reference`, `src -> cmp.signal` at 1 Hz, `fallbackReference` 50,
+  debounce 10 s). Tests: the request shape, the intersection fixture (no
+  side-street flip), chunk boundaries and ownership with overlap, unmatched
+  points and missing positions giving null, the 429 path, chunk failures with
+  `skip` / `fail`, the request cap, decimation, live and non-HERE refusal, and
+  a 1 h synthetic drive (3600 samples, 4 requests, about 0.6 s).
+
+#### Executor behaviour
+
+- `connector.third_party`: HERE and Google Roads lookups are now paced (5 and
+  10 per second) and retried on 429/5xx instead of failing on the first one.
+  OSM's single fixed 3 s back-off is replaced by the retry policy above. The
+  step summary is set even when the node fails, and a failure message ends
+  with the lookup counts in brackets. Failure messages after retries say
+  `after N attempts`.
+- `logic.comparator`: a reference record whose field is `null` clears the
+  held reference (before, it was ignored and the old value held). The
+  connector emits such records only with `emitNoAnswer`, so existing graphs
+  are unaffected.
+
 ## 0.5.0 (2026-09-28)
 
 Webhooks on `output.event` and `nodeId` on events. A minor under the policy

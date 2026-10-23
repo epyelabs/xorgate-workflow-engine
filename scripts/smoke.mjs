@@ -168,11 +168,13 @@ check(
   // The core hash moves on purpose on minors (docs/compatibility.md): 0.2.0 added the two
   // function nodes (08c8c39436928e5e); 0.4.0 added output.visualization's `distance`
   // overlay, model.depth's distanceScale and proximity_gate's maxDistanceM (2b2a3c052696cf1e);
-  // 0.5.0 added output.event's `webhook` (f8861576c807e382). Without core/function the 26
-  // older defs hash to 184300277358e824 (0.4.0: ab458ea46642308b; 0.1.0-0.3.0: e481243f5ffe4678).
-  check('catalogVersion is the 0.5.0 core hash f8861576c807e382', payload.catalogVersion === 'f8861576c807e382', payload.catalogVersion);
+  // 0.5.0 added output.event's `webhook` (f8861576c807e382); unreleased: connector.third_party's
+  // rate policy / no-answer / trace fields and logic.comparator's maxReferenceAgeMs /
+  // fallbackReference (current hash below). Without core/function the 26 older defs hash to the
+  // second value below (0.5.0: 184300277358e824; 0.4.0: ab458ea46642308b; 0.1.0-0.3.0: e481243f5ffe4678).
+  check('catalogVersion is the current core hash 92697a69913738c4', payload.catalogVersion === '92697a69913738c4', payload.catalogVersion);
   const withoutFunctions = cjsRoot.buildCatalogPayload(cjsRoot.createCatalog(cjsRoot.corePacks.filter((p) => p.name !== 'core/function')));
-  check('without core/function the 26 non-function defs hash to 0.5.0\'s 184300277358e824', withoutFunctions.nodes.length === 26 && withoutFunctions.catalogVersion === '184300277358e824', withoutFunctions.catalogVersion);
+  check('without core/function the 26 non-function defs hash to 22138d958ba19520', withoutFunctions.nodes.length === 26 && withoutFunctions.catalogVersion === '22138d958ba19520', withoutFunctions.catalogVersion);
   const oe = payload.nodes.find((n) => n.type === 'output.event');
   check('output.event config gains an optional flat string `webhook` (0.5.0)', oe?.configSchema?.properties?.webhook?.type === 'string' && !(oe.configSchema.required ?? []).includes('webhook') && oe.configDefaults?.webhook === undefined, JSON.stringify(oe?.configSchema?.properties?.webhook));
   // 0.4.0 metric depth: the pure helpers behind distanceM and the distance label.

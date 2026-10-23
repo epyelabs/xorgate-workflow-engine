@@ -19,6 +19,22 @@ const configSchema = z.object({
     .min(0)
     .default(0)
     .describe('Slack added to the reference value before comparing'),
+  maxReferenceAgeMs: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      'A held reference older than this (sample ts minus record ts) is stale: the sample is compared against ' +
+        'fallbackReference, or skipped without one. Default: a reference holds until the next record.',
+    ),
+  fallbackReference: z
+    .number()
+    .optional()
+    .describe(
+      'Reference value used when there is no usable record: before the first one, after a record whose field is ' +
+        'null (e.g. a connector no-answer), or past maxReferenceAgeMs. Default: such samples are skipped.',
+    ),
 });
 
 export const def = defineNode({
@@ -44,8 +60,12 @@ function test(op: 'gt' | 'gte' | 'lt' | 'lte', v: number, bound: number): boolea
   return op === 'gt' ? v > bound : op === 'gte' ? v >= bound : op === 'lt' ? v < bound : v <= bound;
 }
 
-// Reference records hold (latest ts <= sample ts wins); telemetry samples seen
-// before any reference record are skipped rather than compared against nothing.
+// Reference records hold (latest ts <= sample ts wins). A record whose field
+// is null clears the held reference (a connector's no-answer record); a record
+// without the field, or with a non-numeric one, is ignored as before. Samples
+// with no usable reference (none yet, cleared, or older than
+// maxReferenceAgeMs) are compared against fallbackReference when set, and
+// skipped otherwise.
 export const executor = async function* logicComparator(
   inputs: EngineInChannel[],
   config: unknown,
@@ -56,9 +76,12 @@ export const executor = async function* logicComparator(
   const referenceInput = requireInput(inputs, 'reference');
   let reference: number | null = null;
   let referenceMeta: Record<string, unknown> | null = null;
+  let referenceTs: number | null = null;
   let compared = 0;
   let trueCount = 0;
   let skipped = 0;
+  let viaFallback = 0;
+  let stale = 0;
   // Reference first: mergeByTs breaks ts ties by input order, so a record
   // stamped at the same ts as a sample applies to that sample.
   for await (const { input, msg } of mergeByTs([referenceInput, signalInput])) {
@@ -68,18 +91,39 @@ export const executor = async function* logicComparator(
       if (typeof value === 'number') {
         reference = value;
         referenceMeta = record;
+        referenceTs = msg.ts;
+      } else if (value === null) {
+        reference = null;
+        referenceMeta = record;
+        referenceTs = msg.ts;
       }
       continue;
     }
     const payload = msg.payload as TelemetryPayload;
     const key = resolveSignal(cfg.signal, payload.signals, def.label);
     if (key === null) continue;
-    if (reference === null) {
+    const referenceAgeMs = referenceTs === null ? null : msg.ts - referenceTs;
+    const isStale =
+      reference !== null &&
+      cfg.maxReferenceAgeMs !== undefined &&
+      referenceAgeMs !== null &&
+      referenceAgeMs > cfg.maxReferenceAgeMs;
+    if (isStale) stale += 1;
+    let used: number;
+    let referenceSource: 'record' | 'fallback';
+    if (reference !== null && !isStale) {
+      used = reference;
+      referenceSource = 'record';
+    } else if (cfg.fallbackReference !== undefined) {
+      used = cfg.fallbackReference;
+      referenceSource = 'fallback';
+      viaFallback += 1;
+    } else {
       skipped += 1;
       continue;
     }
     const observed = payload.signals[key];
-    const bound = reference + cfg.margin;
+    const bound = used + cfg.margin;
     const value = test(cfg.operator, observed, bound);
     compared += 1;
     if (value) trueCount += 1;
@@ -92,12 +136,20 @@ export const executor = async function* logicComparator(
           signal: key,
           observed,
           operator: cfg.operator,
-          reference,
+          reference: used,
           margin: cfg.margin,
           record: referenceMeta,
+          referenceSource,
+          referenceAgeMs,
         },
       },
     };
   }
-  ctx.setSummary(`true on ${trueCount}/${compared} samples (${skipped} before first reference)`);
+  ctx.setSummary(
+    `true on ${trueCount}/${compared} samples (${skipped} ${
+      cfg.maxReferenceAgeMs !== undefined || cfg.fallbackReference !== undefined ? 'without a usable reference' : 'before first reference'
+    })` +
+      (viaFallback > 0 ? `, ${viaFallback} against fallback ${cfg.fallbackReference}` : '') +
+      (stale > 0 ? `, ${stale} with a stale reference` : ''),
+  );
 };
