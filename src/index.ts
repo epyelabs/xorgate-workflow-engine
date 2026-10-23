@@ -152,14 +152,21 @@ export { captureFormatsOf } from './local/capture-formats';
 export {
   buildGoogleRoadsUrl,
   buildHereRequest,
+  buildHereRoutingRequest,
   buildOverpassRequest,
+  decodeFlexiblePolyline,
+  matchToRoute,
   parseGoogleRoadsResponse,
   parseHereResponse,
+  parseHereRoutingResponse,
   parseMaxspeedTag,
   parseOverpassResponse,
 } from './catalog/nodes/connector-third-party';
 export type {
   HereRouteMatchResponse,
+  HereRoutingResponse,
+  RouteMatch,
+  RouteSegment,
   OverpassResponse,
   RoadsResponse,
   SpeedLimitLookup,

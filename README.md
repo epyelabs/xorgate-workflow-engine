@@ -83,7 +83,12 @@ xwe doctor                                                    # ffmpeg, ONNX Run
   (`onLookupError: "skip"`, `maxErrorRatio`) and emit null "no answer"
   records (`emitNoAnswer`); `osmEndpoint` points OSM at another Overpass
   server. `lookupMode: "trace"` route-matches the whole input with HERE in
-  chunked requests (batch and simulation runs only). `logic.comparator`'s
+  chunked requests (batch and simulation runs only). `provider:
+  "here_routing"` (trace mode only) does the same through the HERE Routing
+  API v8 (`/v8/routes` with pass-through waypoints and `speedLimit` spans),
+  which self-serve HERE plans can call (Route Matching answers them 429);
+  every sample is matched to the returned route within `traceMatchRadiusM`
+  (50 m) and carries `roadName` and `linkId`. `logic.comparator`'s
   `maxReferenceAgeMs` and `fallbackReference` handle a stale or missing
   reference.
 - **Channels**: in batch and simulation runs every edge except `frames` and

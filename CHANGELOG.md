@@ -4,6 +4,89 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
+## Unreleased
+
+A `here_routing` speed-limit provider for `connector.third_party`, so HERE
+speed limits work on a self-serve HERE plan: Route Matching v8 answers those
+accounts `429` ("0 per 10 s"), while the Routing API v8 (`/v8/routes`, 10
+requests per second on that plan) is allowed. The core catalog moves from
+`92697a69913738c4` to `51116ae4e9dd8ba4` (28 nodes); without `core/function`
+the 26 other defs move from `22138d958ba19520` to `d55afc8c80c2a44f`. Every
+change is additive (minor-level under `docs/compatibility.md`).
+
+**Upgrade notes.** Core must bump `EXPECTED_CATALOG_VERSION` to
+`51116ae4e9dd8ba4`. Existing templates parse and run unchanged: `provider`
+gains an enum value, `traceMatchRadiusM` is new with a default, and
+`traceChunkPoints`, `traceOverlapPoints` and `traceMinSpacingM` no longer
+carry a schema `default` (so they leave the catalog payload's
+`configDefaults`); the executor applies the same values as before for
+`here` (1000, 10, 0) and its own for `here_routing` (50, 2, 10). An editor
+that pre-filled them from `configDefaults` now leaves them unset, which
+means "the provider's default". To use the new provider set
+`provider: "here_routing"` and `lookupMode: "trace"` with the same
+`here-api-key` secret.
+
+### Added
+
+- `connector.third_party` `provider: 'here_routing'` (trace mode only; batch
+  and simulation runs). The input is collected, decimated and chunked like
+  HERE trace mode; each chunk is one
+  `GET https://router.hereapi.com/v8/routes?transportMode=car&routingMode=fast&departureTime=any&origin=<first>&via=<lat,lng>!passThrough=true...&destination=<last>&return=polyline&spans=speedLimit,names,length,segmentId&apikey=...`
+  (coordinates at 6 decimals; `,` and `!` literal as in HERE's examples).
+  Pass-through vias shape the route without splitting it into sections or
+  allowing a U-turn at them; `departureTime=any` makes the route
+  time-independent, so live traffic or a short-term closure today does not
+  re-route a historical trace. Same secret (`here-api-key`), pacing (default
+  5 requests per second; `maxRequestsPerSecond` overrides, the plan allows
+  10), retries on 429/5xx, `requestTimeoutMs` (30 s per chunk),
+  `onLookupError` / `maxErrorRatio` per chunk, a 401/403 always fails, and
+  `maxLookupsPerRun` counts route requests.
+- Response mapping: every section's flexible polyline is decoded; span `k`
+  covers polyline points `offset_k .. offset_{k+1}`, so each segment takes
+  its span's `speedLimit` (m/s; km/h = `round(m/s * 3.6)`, absent or null =
+  no posted limit), first `names[].value` and `topologySegmentId` (what
+  `spans=segmentId` returns today) or `segmentId`. Each sample is matched,
+  by its own position, to the nearest point on the route of the chunk that
+  owns it (point-to-segment distance, so a sample midway along a long
+  straight segment is not "far" from its vertices); further than
+  `traceMatchRadiusM` (new, default 50 m) is unmatched. Records, one per
+  sample in ts order:
+  `{ ts, speedLimitKph | null, source: 'here_routing', matched, roadName?, linkId?, reason? }`
+  (a matched span without a limit is `null` with `matched: true`, reason
+  `no_answer`; unmatched, failed, capped and position-less samples are null
+  with `matched: false` and reason `no_answer`, `error`, `capped`,
+  `no_position`). An answer without a route (`routes: []`, notices logged)
+  leaves the chunk's samples unmatched; it is not an error.
+- Chunking for `here_routing`: `traceChunkPoints` default 50 and at most 100
+  (every chunk point is a waypoint; HERE limits waypoints only by the request
+  length and recommends at most 100 per route request; a larger value fails
+  at start), `traceOverlapPoints` default 2 and at least 1 (so each route
+  starts where the previous one ended), `traceMinSpacingM` default 10
+  (parked GPS jitter would otherwise force loops through pass-through
+  waypoints; dropped samples are still matched by their own position). A
+  1 h drive at 1 Hz and ~12 m spacing is 75 requests (`1 + ceil((3600 - 50)
+  / 48)`; 72 without overlap).
+- Summary: `<n> speed-limit record(s) via here_routing (trace), <requests>
+  lookup(s), ..., <m> sample(s) matched, <u> unmatched, <z> with a null
+  limit, <c> chunk(s)`.
+- Refusals at start: `here_routing` in point mode (the default
+  `lookupMode`), in a live run, or with `traceChunkPoints` above 100.
+- Root exports `decodeFlexiblePolyline` (HERE flexible polyline v1, any
+  precision, a third dimension read and dropped), `buildHereRoutingRequest`,
+  `parseHereRoutingResponse`, `matchToRoute` and the types
+  `HereRoutingResponse`, `RouteSegment`, `RouteMatch`; module constants
+  `HERE_ROUTING_URL`, `HERE_ROUTING_MAX_WAYPOINTS`,
+  `DEFAULT_TRACE_MATCH_RADIUS_M`, `TRACE_DEFAULTS`.
+- Fixtures: `fixtures/connector/here-routes-royal-york.json` (a real Routing
+  v8 answer from the owner's self-serve account), `telemetry/royal-york-drive.csv`
+  (30 samples along it), `templates/overspeed-here-routing.json`.
+- Tests: `test/connector/connector-test.mjs` gains 33 here_routing checks
+  (the documented flexible-polyline example, the real answer's spans, nearest
+  point and the radius, chunking with overlap, 429 then success, chunk
+  failures, the key, the cap, the refusals, a 1 h drive in 75 requests); the
+  golden suite runs the template over the real answer and an 1800-sample
+  drive in default batch mode; smoke pins the new hash and the root helpers.
+
 ## 0.5.1 (2026-10-23)
 
 Elastic batch channels with a stall detector, and a hardened

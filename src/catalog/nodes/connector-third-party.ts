@@ -12,10 +12,24 @@ import { defineNode } from '../types';
 // `placeId` stays Google-only. A future provider with a different output shape
 // needs either its own node type or config-dependent ports (a NodeTypeDef
 // contract extension) — revisit then, not now.
-export type SpeedLimitProvider = 'google_roads' | 'here' | 'osm';
+export type SpeedLimitProvider = 'google_roads' | 'here' | 'here_routing' | 'osm';
 
 export const GOOGLE_ROADS_URL = 'https://roads.googleapis.com/v1/speedLimits';
 export const HERE_ROUTE_MATCH_URL = 'https://routematching.hereapi.com/v8/match/routelinks';
+export const HERE_ROUTING_URL = 'https://router.hereapi.com/v8/routes';
+/**
+ * Waypoints (origin + vias + destination) per HERE Routing v8 request. HERE
+ * bounds the count only by the HTTP request length and recommends at most 100
+ * waypoints per route request (Routing v8 guide, "Waypoints overview").
+ */
+export const HERE_ROUTING_MAX_WAYPOINTS = 100;
+/** here_routing: a sample further than this from the returned route is unmatched (default of `traceMatchRadiusM`). */
+export const DEFAULT_TRACE_MATCH_RADIUS_M = 50;
+/** Trace-mode defaults per provider, for the trace fields left unset. */
+export const TRACE_DEFAULTS: Record<'here' | 'here_routing', { chunkPoints: number; overlapPoints: number; minSpacingM: number }> = {
+  here: { chunkPoints: 1000, overlapPoints: 10, minSpacingM: 0 },
+  here_routing: { chunkPoints: 50, overlapPoints: 2, minSpacingM: 10 },
+};
 export const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
 // Overpass etiquette: identify the client and give operators a contact handle.
 export const OVERPASS_USER_AGENT = 'xorgate-workflows/2 (speed-limit connector; https://xorgate.io)';
@@ -23,7 +37,7 @@ export const OSM_MIN_INTERVAL_MS = 1000;
 export const OSM_JITTER_MS = 250;
 export const OSM_SEARCH_RADIUS_M = 30;
 /** Default pacing per provider (requests per second), when `maxRequestsPerSecond` is unset. */
-export const DEFAULT_REQUESTS_PER_SECOND: Record<SpeedLimitProvider, number> = { osm: 1, here: 5, google_roads: 10 };
+export const DEFAULT_REQUESTS_PER_SECOND: Record<SpeedLimitProvider, number> = { osm: 1, here: 5, here_routing: 5, google_roads: 10 };
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10000;
 export const DEFAULT_TRACE_REQUEST_TIMEOUT_MS = 30000;
 /** A Retry-After longer than this is not waited out: the lookup fails (or is skipped) instead. */
@@ -33,11 +47,13 @@ export const MIN_LOOKUPS_FOR_ERROR_RATIO = 10;
 
 const configSchema = z.object({
   provider: z
-    .enum(['google_roads', 'here', 'osm'])
+    .enum(['google_roads', 'here', 'here_routing', 'osm'])
     .default('google_roads')
     .describe(
       'Data provider. Google Roads: best snap-to-road quality, requires the Google speed-limits ' +
-        'licensing on the API key. HERE: available on the standard tier (org or platform key). ' +
+        'licensing on the API key. HERE: Route Matching v8 (not available on self-serve HERE plans). ' +
+        'HERE Routing (here_routing): Routing v8 routes through the GPS positions with speedLimit spans, ' +
+        'works on self-serve plans; lookupMode trace only. ' +
         'OSM (Overpass): no key and no bill, community coverage varies, lookups throttled to ~1/s.',
     ),
   cacheTtlSeconds: z
@@ -62,7 +78,7 @@ const configSchema = z.object({
     .max(100)
     .optional()
     .describe(
-      'Request pacing (token bucket, burst 1). Default per provider: OSM 1 (plus up to 250 ms jitter), HERE 5, Google Roads 10.',
+      'Request pacing (token bucket, burst 1). Default per provider: OSM 1 (plus up to 250 ms jitter), HERE 5, HERE Routing 5, Google Roads 10.',
     ),
   retry: z
     .object({
@@ -112,35 +128,49 @@ const configSchema = z.object({
     .enum(['point', 'trace'])
     .default('point')
     .describe(
-      'point: one lookup per unique position (every provider, live included). trace (HERE only, batch and ' +
-        'simulation runs): the whole input is route-matched as GPS traces in chunks, and every sample gets the ' +
-        'limit of the road it was matched to, or null. Far fewer requests, no side-street flips.',
+      'point: one lookup per unique position (here, google_roads, osm; live included). trace (here and ' +
+        'here_routing, batch and simulation runs): the whole input is matched to roads in chunks, and every ' +
+        'sample gets the limit of the road it was matched to, or null. Far fewer requests, no side-street flips. ' +
+        'here_routing runs in trace mode only.',
     ),
   traceChunkPoints: z
     .number()
     .int()
     .min(2)
     .max(10000)
-    .default(1000)
-    .describe('trace: points per route-matching request (HERE accepts up to 100,000 points / 15,000 km per trace)'),
+    .optional()
+    .describe(
+      'trace: points per request. Default here 1000 (Route Matching accepts up to 100,000 points / 15,000 km ' +
+        'per trace); here_routing 50, at most 100 (each point is a route waypoint; HERE recommends at most 100 per request)',
+    ),
   traceOverlapPoints: z
     .number()
     .int()
     .min(0)
     .max(1000)
-    .default(10)
+    .optional()
     .describe(
       'trace: points shared by consecutive chunks, so each chunk edge is matched with context (capped at ' +
-        'half a chunk); each shared point takes its answer from the chunk where it is further from the edge',
+        'half a chunk); each shared point takes its answer from the chunk where it is further from the edge. ' +
+        'Default here 10, here_routing 2 (at least 1, so consecutive routes join)',
     ),
   traceMinSpacingM: z
     .number()
     .min(0)
     .max(1000)
-    .default(0)
+    .optional()
     .describe(
-      'trace: drop points closer than this to the last kept point before sending (stationary GPS); dropped ' +
-        'samples take the answer of the last kept point. 0 sends every positioned sample.',
+      'trace: drop points closer than this to the last kept point before sending (stationary GPS). here: ' +
+        'dropped samples take the answer of the last kept point; here_routing: every sample is still matched ' +
+        'to the returned route by its own position. Default here 0 (every positioned sample is sent), here_routing 10.',
+    ),
+  traceMatchRadiusM: z
+    .number()
+    .min(1)
+    .max(500)
+    .default(DEFAULT_TRACE_MATCH_RADIUS_M)
+    .describe(
+      'here_routing: a sample further than this from the returned route (nearest point on its polyline) is unmatched (null limit)',
     ),
 });
 
@@ -211,6 +241,18 @@ export const def = defineNode({
 //   channelCapacity above the sample count), and it is refused in
 //   live runs, where a bounded look-ahead window would still stall a
 //   ts-merging consumer of the same source.
+// - here_routing (0.5.2): the same trace collection, decimation and chunking,
+//   but each chunk is one HERE Routing v8 GET (/v8/routes, origin + pass-through
+//   vias + destination, spans=speedLimit,names,length,segmentId), because
+//   self-serve HERE plans get Route Matching at "0 per 10 s" while Routing is
+//   allowed. Trace defaults differ (50 points per chunk, at most 100
+//   waypoints; overlap 2, at least 1 so routes join; 10 m spacing). Each
+//   section polyline (flexible polyline) is decoded, spans give each segment
+//   its limit (m/s -> km/h), name and segment id, and every sample is matched
+//   by its own position to the nearest point of the route of the chunk that
+//   owns it (`traceMatchRadiusM`, default 50 m, else unmatched). Records:
+//   `{ ts, speedLimitKph | null, source: 'here_routing', matched, roadName?, linkId?, reason? }`.
+//   Point mode is refused at start (a one-point route is not a lookup).
 
 /** One provider answer for one rounded position; null limit = no answer. */
 export interface SpeedLimitLookup {
@@ -490,6 +532,201 @@ export function haversineM(aLat: number, aLng: number, bLat: number, bLng: numbe
   return 2 * 6371008.8 * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
+// --- HERE Routing v8 (here_routing: routes through the trace, speedLimit spans) -------
+
+const FLEXPOLY_TABLE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const FLEXPOLY_INDEX: Record<string, number> = Object.fromEntries([...FLEXPOLY_TABLE].map((ch, i) => [ch, i]));
+
+/**
+ * Decodes a HERE flexible polyline (https://github.com/heremaps/flexible-polyline,
+ * format v1): an unsigned varint version (1), an unsigned varint header
+ * (bits 0-3 precision, 4-6 third-dimension type, 7-10 its precision), then
+ * zigzag signed varints in 5-bit chunks (0x20 = more follows) over a 64-char
+ * table, as deltas from the previous tuple. Arithmetic, not 32-bit bit ops, so
+ * high precisions do not overflow. A third dimension is read and dropped.
+ */
+export function decodeFlexiblePolyline(encoded: string): Array<{ lat: number; lng: number }> {
+  let pos = 0;
+  const readUnsigned = (): number => {
+    let result = 0;
+    let factor = 1;
+    for (;;) {
+      if (pos >= encoded.length) throw new Error('flexible polyline: truncated value');
+      const v = FLEXPOLY_INDEX[encoded[pos++]];
+      if (v === undefined) throw new Error(`flexible polyline: invalid character '${encoded[pos - 1]}'`);
+      result += (v & 0x1f) * factor;
+      if ((v & 0x20) === 0) return result;
+      factor *= 32;
+    }
+  };
+  const readSigned = (): number => {
+    const u = readUnsigned();
+    return u % 2 === 1 ? -(u + 1) / 2 : u / 2;
+  };
+  const version = readUnsigned();
+  if (version !== 1) throw new Error(`flexible polyline: unsupported version ${version}`);
+  const header = readUnsigned();
+  const precision = header % 16;
+  const thirdDim = Math.floor(header / 16) % 8;
+  const scale = 10 ** precision;
+  const out: Array<{ lat: number; lng: number }> = [];
+  let lat = 0;
+  let lng = 0;
+  while (pos < encoded.length) {
+    lat += readSigned();
+    lng += readSigned();
+    if (thirdDim !== 0) readSigned();
+    out.push({ lat: lat / scale, lng: lng / scale });
+  }
+  return out;
+}
+
+/**
+ * One HERE Routing v8 request through a chunk of the trace: origin = first
+ * point, destination = last, every point between as a pass-through via
+ * (`via=lat,lng!passThrough=true`: shapes the route without splitting it into
+ * sections or allowing a U-turn there), car, fast, time-independent
+ * (`departureTime=any`: no live traffic or short-term closures re-routing a
+ * historical trace), with the polyline and per-span speed limit, road names,
+ * length and segment ids. GET; the query is built by hand so `,` and `!` stay
+ * literal, as in HERE's examples.
+ */
+export function buildHereRoutingRequest(points: Array<{ lat: number; lng: number }>, apiKey: string): { url: string; init: RequestInit } {
+  if (points.length < 2) throw new Error('buildHereRoutingRequest needs at least 2 points');
+  const at = (p: { lat: number; lng: number }): string => `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
+  const query = [
+    'transportMode=car',
+    'routingMode=fast',
+    'departureTime=any',
+    `origin=${at(points[0])}`,
+    ...points.slice(1, -1).map((p) => `via=${at(p)}!passThrough=true`),
+    `destination=${at(points[points.length - 1])}`,
+    'return=polyline',
+    'spans=speedLimit,names,length,segmentId',
+    `apikey=${encodeURIComponent(apiKey)}`,
+  ];
+  return { url: `${HERE_ROUTING_URL}?${query.join('&')}`, init: { method: 'GET' } };
+}
+
+/** One span of a Routing v8 section; `offset` indexes the section polyline's points. */
+export interface HereRoutingSpan {
+  offset?: number;
+  length?: number;
+  /** m/s; absent or null where HERE has no posted limit. */
+  speedLimit?: number | null;
+  names?: Array<{ value?: string; language?: string }>;
+  segmentId?: string | null;
+  topologySegmentId?: string | null;
+}
+
+export interface HereRoutingSection {
+  polyline?: string;
+  spans?: HereRoutingSpan[];
+}
+
+/** Routing v8 `/v8/routes` answer (the fields here_routing reads). */
+export interface HereRoutingResponse {
+  routes?: Array<{ sections?: HereRoutingSection[] }>;
+  notices?: Array<{ code?: string; title?: string; severity?: string }>;
+}
+
+/** One straight piece of the returned route with the span attributes it lies in. */
+export interface RouteSegment {
+  a: { lat: number; lng: number };
+  b: { lat: number; lng: number };
+  speedLimitKph: number | null;
+  roadName?: string;
+  linkId?: string;
+}
+
+/**
+ * The first route's sections as segments between consecutive polyline points.
+ * Span k covers points offset_k .. offset_{k+1} (the last span to the end of
+ * the section), so the segment from point j to j+1 takes the span with the
+ * largest offset <= j. speedLimit is m/s: km/h = round(m/s * 3.6). The segment
+ * id is `topologySegmentId` (what spans=segmentId returns today) or
+ * `segmentId`. No route (HERE could not route the chunk) is an empty list.
+ */
+export function parseHereRoutingResponse(data: HereRoutingResponse): RouteSegment[] {
+  const out: RouteSegment[] = [];
+  for (const section of data.routes?.[0]?.sections ?? []) {
+    if (typeof section.polyline !== 'string' || section.polyline === '') continue;
+    const pts = decodeFlexiblePolyline(section.polyline);
+    const spans = [...(section.spans ?? [])]
+      .filter((sp) => typeof sp.offset === 'number')
+      .sort((x, y) => (x.offset as number) - (y.offset as number));
+    let k = -1;
+    const segs = pts.length === 1 ? [[0, 0]] : pts.slice(0, -1).map((_, j) => [j, j + 1]);
+    for (const [i, j] of segs) {
+      while (k + 1 < spans.length && (spans[k + 1].offset as number) <= i) k += 1;
+      const span = k >= 0 ? spans[k] : undefined;
+      const mps = span?.speedLimit;
+      const name = span?.names?.find((n) => typeof n.value === 'string' && n.value !== '')?.value;
+      const id = span?.topologySegmentId ?? span?.segmentId;
+      out.push({
+        a: pts[i],
+        b: pts[j],
+        speedLimitKph: typeof mps === 'number' && Number.isFinite(mps) && mps > 0 ? Math.round(mps * 3.6) : null,
+        ...(name ? { roadName: name } : {}),
+        ...(typeof id === 'string' && id !== '' ? { linkId: id } : {}),
+      });
+    }
+  }
+  return out;
+}
+
+export interface RouteMatch {
+  matched: boolean;
+  speedLimitKph: number | null;
+  /** Metres from the sample to the nearest point of the route; null without a route. */
+  distanceM: number | null;
+  roadName?: string;
+  linkId?: string;
+}
+
+/**
+ * Nearest point of the route to (lat, lng): each segment is projected in a
+ * local equirectangular frame around the sample (sub-metre error at these
+ * distances), so a sample midway along a long straight segment is as close as
+ * the road, not as far as the nearest vertex. Further than `maxDistanceM` is
+ * unmatched; the earlier segment wins a tie (a vertex shared by two spans).
+ */
+export function matchToRoute(lat: number, lng: number, segments: RouteSegment[], maxDistanceM: number): RouteMatch {
+  const R = 6371008.8;
+  const rad = Math.PI / 180;
+  const kx = Math.cos(lat * rad) * R * rad;
+  const ky = R * rad;
+  let best: RouteSegment | undefined;
+  let bestD2 = Number.POSITIVE_INFINITY;
+  for (const seg of segments) {
+    const ax = (seg.a.lng - lng) * kx;
+    const ay = (seg.a.lat - lat) * ky;
+    const bx = (seg.b.lng - lng) * kx;
+    const by = (seg.b.lat - lat) * ky;
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 > 0 ? Math.min(1, Math.max(0, -(ax * dx + ay * dy) / len2)) : 0;
+    const px = ax + t * dx;
+    const py = ay + t * dy;
+    const d2 = px * px + py * py;
+    if (d2 < bestD2) {
+      bestD2 = d2;
+      best = seg;
+    }
+  }
+  if (!best) return { matched: false, speedLimitKph: null, distanceM: null };
+  const distanceM = Math.sqrt(bestD2);
+  if (distanceM > maxDistanceM) return { matched: false, speedLimitKph: null, distanceM };
+  return {
+    matched: true,
+    speedLimitKph: best.speedLimitKph,
+    distanceM,
+    ...(best.roadName ? { roadName: best.roadName } : {}),
+    ...(best.linkId ? { linkId: best.linkId } : {}),
+  };
+}
+
 // --- OSM (Overpass) ---------------------------------------------------------------
 
 export function buildOverpassRequest(
@@ -764,6 +1001,11 @@ async function fetchLookup(lat: number, lng: number, d: LookupDeps): Promise<Spe
     return parseGoogleRoadsResponse(parseJson<RoadsResponse>(out.text, 'Google Roads'));
   }
 
+  if (d.provider === 'here_routing') {
+    // Rejected at start: here_routing routes whole traces (lookupMode 'trace').
+    throw new Error("provider 'here_routing' has no point lookup; it runs in lookupMode 'trace' only");
+  }
+
   if (d.provider === 'here') {
     const out = await requestWithPolicy({
       ...common,
@@ -868,10 +1110,26 @@ export const executor = async function* connectorThirdParty(
   let traceNote = '';
 
   try {
+    if (provider === 'here_routing' && cfg.lookupMode !== 'trace') {
+      throw new Error(
+        "provider 'here_routing' runs in lookupMode 'trace' only (it routes through the whole trace and matches " +
+          "every sample to that route); set lookupMode: 'trace', or use provider 'here' for point lookups",
+      );
+    }
     if (cfg.lookupMode === 'trace') {
-      if (provider !== 'here') {
+      if (provider !== 'here' && provider !== 'here_routing') {
         throw new Error(
-          `lookupMode 'trace' supports provider 'here' only (got '${provider}'); use lookupMode 'point' for ${provider}`,
+          `lookupMode 'trace' supports providers 'here' and 'here_routing' only (got '${provider}'); use lookupMode 'point' for ${provider}`,
+        );
+      }
+      if (
+        provider === 'here_routing' &&
+        cfg.traceChunkPoints !== undefined &&
+        cfg.traceChunkPoints > HERE_ROUTING_MAX_WAYPOINTS
+      ) {
+        throw new Error(
+          `traceChunkPoints ${cfg.traceChunkPoints} is above ${HERE_ROUTING_MAX_WAYPOINTS} for provider 'here_routing': ` +
+            `every chunk point is a route waypoint and HERE recommends at most ${HERE_ROUTING_MAX_WAYPOINTS} per request`,
         );
       }
       if (ctx.mode === 'live') {
@@ -888,7 +1146,9 @@ export const executor = async function* connectorThirdParty(
       if (!ctx.secrets) {
         throw new Error('This engine target has no secret access; the Connector node cannot run here');
       }
-      apiKey = await ctx.secrets.getSecret(provider === 'here' ? 'here-api-key' : 'google-roads-api-key');
+      apiKey = await ctx.secrets.getSecret(
+        provider === 'here' || provider === 'here_routing' ? 'here-api-key' : 'google-roads-api-key',
+      );
     }
     const throttle = new RequestThrottle(cfg.maxRequestsPerSecond ?? DEFAULT_REQUESTS_PER_SECOND[provider], {
       jitterMs: provider === 'osm' ? OSM_JITTER_MS : 0,
@@ -955,13 +1215,27 @@ export const executor = async function* connectorThirdParty(
       for await (const sample of telemetrySamples(requireInput(inputs, 'positions'))) samples.push(sample);
       samples.sort((a, b) => a.ts - b.ts);
 
+      const td = TRACE_DEFAULTS[provider === 'here_routing' ? 'here_routing' : 'here'];
+      const chunkPoints = cfg.traceChunkPoints ?? td.chunkPoints;
+      // here_routing: consecutive chunks share at least one point, so the routes join end to start.
+      const overlapPoints =
+        provider === 'here_routing'
+          ? Math.max(1, cfg.traceOverlapPoints ?? td.overlapPoints)
+          : (cfg.traceOverlapPoints ?? td.overlapPoints);
+      const minSpacingM = cfg.traceMinSpacingM ?? td.minSpacingM;
+
       const kept: HereTracePoint[] = [];
+      const positions: Array<{ lat: number; lng: number } | null> = [];
       const keptOf: Array<number | null> = samples.map((sample) => {
         const lat = sample.signals['gps.latitude'] ?? sample.signals['gps.lat'];
         const lng = sample.signals['gps.longitude'] ?? sample.signals['gps.lon'];
-        if (typeof lat !== 'number' || typeof lng !== 'number') return null;
+        if (typeof lat !== 'number' || typeof lng !== 'number') {
+          positions.push(null);
+          return null;
+        }
+        positions.push({ lat, lng });
         const last = kept[kept.length - 1];
-        if (last && cfg.traceMinSpacingM > 0 && haversineM(last.lat, last.lng, lat, lng) < cfg.traceMinSpacingM) {
+        if (last && minSpacingM > 0 && haversineM(last.lat, last.lng, lat, lng) < minSpacingM) {
           return kept.length - 1;
         }
         const heading = sample.signals['gps.heading'] ?? sample.signals['gps.course'];
@@ -976,8 +1250,115 @@ export const executor = async function* connectorThirdParty(
         return kept.length - 1;
       });
 
+      const chunks = planTraceChunks(kept.length, chunkPoints, overlapPoints);
+
+      if (provider === 'here_routing') {
+        // One Routing v8 request per chunk; each sample is then matched, by
+        // its own position, to the route of the chunk that owns its kept point.
+        const ownerOf: number[] = new Array(kept.length).fill(0);
+        chunks.forEach((ch, idx) => {
+          for (let i = ch.ownFrom; i < ch.ownTo; i++) ownerOf[i] = idx;
+        });
+        const routes: Array<RouteSegment[] | 'capped' | 'error'> = chunks.map(() => 'capped');
+        for (let idx = 0; idx < chunks.length; idx++) {
+          const chunk = chunks[idx];
+          const points = kept.slice(chunk.start, chunk.end);
+          if (points.length < 2) {
+            routes[idx] = []; // one position in the whole input: nothing to route, unmatched
+            continue;
+          }
+          if (c.requests >= cfg.maxLookupsPerRun) break; // the rest stay 'capped'
+          c.requests += 1;
+          const where = `points ${chunk.start}-${chunk.end - 1}`;
+          try {
+            const out = await requestWithPolicy({
+              http: deps.http,
+              throttle: deps.throttle,
+              retry: deps.retry,
+              timeoutMs: deps.timeoutMs,
+              stats: deps.stats,
+              label: 'HERE Routing',
+              build: () => buildHereRoutingRequest(points, apiKey ?? ''),
+            });
+            if (out.status === 401 || out.status === 403) {
+              throw new ConnectorFatalError(`HERE Routing rejected the API key (HTTP ${out.status}): ${snippet(out.text)}`);
+            }
+            if (!out.ok) {
+              throw new ConnectorLookupError(
+                `HERE Routing request failed (HTTP ${out.status}${attemptsNote(out.attempts)}, ${where}): ${snippet(out.text)}`,
+              );
+            }
+            const data = parseJson<HereRoutingResponse>(out.text, 'HERE Routing');
+            let segments: RouteSegment[];
+            try {
+              segments = parseHereRoutingResponse(data);
+            } catch (err) {
+              throw new ConnectorLookupError(
+                `HERE Routing answer for ${where} could not be read: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+            if (segments.length === 0) {
+              const codes = (data.notices ?? []).map((n) => n.code ?? n.title).filter(Boolean).join(', ');
+              ctx.log(`HERE Routing returned no route for ${where}${codes ? ` (${codes})` : ''}; its samples are unmatched`);
+            }
+            routes[idx] = segments;
+          } catch (err) {
+            if (!(err instanceof ConnectorLookupError) || cfg.onLookupError === 'fail') throw err;
+            c.errors += 1;
+            lastError = err.message;
+            ctx.log(`route chunk failed, skipped: ${err.message}`);
+            routes[idx] = 'error';
+          }
+        }
+        checkErrorBudget(true, 1);
+
+        let matchedSamples = 0;
+        let unmatchedSamples = 0;
+        let nullLimitSamples = 0;
+        for (let i = 0; i < samples.length; i++) {
+          const ts = samples[i].ts;
+          const k = keptOf[i];
+          const pos = positions[i];
+          if (k === null || pos === null) {
+            c.skippedNoPosition += 1;
+            c.nullRecords += 1;
+            yield { ch: 'json' as const, ts, payload: { ts, speedLimitKph: null, source: provider, matched: false, reason: 'no_position' } };
+            continue;
+          }
+          const route = routes[ownerOf[k]];
+          if (route === 'capped' || route === 'error') {
+            if (route === 'capped') c.skippedByCap += 1;
+            c.nullRecords += 1;
+            yield { ch: 'json' as const, ts, payload: { ts, speedLimitKph: null, source: provider, matched: false, reason: route } };
+            continue;
+          }
+          const m = matchToRoute(pos.lat, pos.lng, route, cfg.traceMatchRadiusM);
+          const extra = { ...(m.roadName ? { roadName: m.roadName } : {}), ...(m.linkId ? { linkId: m.linkId } : {}) };
+          if (!m.matched) {
+            unmatchedSamples += 1;
+            c.noCoverage += 1;
+            c.nullRecords += 1;
+            yield { ch: 'json' as const, ts, payload: { ts, speedLimitKph: null, source: provider, matched: false, reason: 'no_answer' } };
+            continue;
+          }
+          matchedSamples += 1;
+          if (m.speedLimitKph === null) {
+            nullLimitSamples += 1;
+            c.noCoverage += 1;
+            c.nullRecords += 1;
+            yield { ch: 'json' as const, ts, payload: { ts, speedLimitKph: null, source: provider, matched: true, ...extra, reason: 'no_answer' } };
+            continue;
+          }
+          c.emitted += 1;
+          yield { ch: 'json' as const, ts, payload: { ts, speedLimitKph: m.speedLimitKph, source: provider, matched: true, ...extra } };
+        }
+        traceNote =
+          `, ${matchedSamples} sample(s) matched, ${unmatchedSamples} unmatched, ` +
+          `${nullLimitSamples} with a null limit, ${chunks.length} chunk(s)`;
+        return;
+      }
+
       const answers: Array<HereTraceMatch | 'capped' | 'error'> = new Array(kept.length).fill('capped');
-      const chunks = planTraceChunks(kept.length, cfg.traceChunkPoints, cfg.traceOverlapPoints);
       for (const chunk of chunks) {
         if (c.requests >= cfg.maxLookupsPerRun) break; // the rest stay 'capped'
         c.requests += 1;

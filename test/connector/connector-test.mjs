@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Connector and comparator suite (P0.3 rate policy, P1.1 trace mode): the
+// Connector and comparator suite (P0.3 rate policy, P1.1 trace mode, 0.5.2
+// here_routing): the
 // connector.third_party executor and logic.comparator driven through
 // runGraph with HTTP mocked (no network) and a virtual clock for pacing and
 // back-off. Run `npm run build` first (`npm test` does).
@@ -427,7 +428,7 @@ const csvSamples = (p) => {
   const live = await run(connectorGraph(traceCfg()), drive(3), mockHere(), { mode: 'live' });
   check('trace in a live run fails at start with a clear message (batch and simulation only)', live.outcome.status === 'failed' && /lookupMode 'trace' collects the whole input before matching it, so it runs in batch and simulation runs only/.test(live.outcome.error), live.outcome.error);
   const osm = await run(connectorGraph({ provider: 'osm', lookupMode: 'trace' }), drive(3), mockHere());
-  check('trace with a provider other than HERE fails at start', osm.outcome.status === 'failed' && /supports provider 'here' only \(got 'osm'\)/.test(osm.outcome.error), osm.outcome.error);
+  check('trace with a provider other than HERE / HERE Routing fails at start', osm.outcome.status === 'failed' && /supports providers 'here' and 'here_routing' only \(got 'osm'\)/.test(osm.outcome.error), osm.outcome.error);
 }
 
 // --- a 1 h drive, production-shaped graph, mocked HERE ---------------------------------------
@@ -441,6 +442,207 @@ const csvSamples = (p) => {
   const ms = Date.now() - started;
   console.log(`     (1 h trace drive wall time: ${ms} ms)`);
   check('1 h drive (3600 samples): 4 chunk requests instead of ~360 point lookups, 3600 records, 6 overspeed events, well under 5 s', r.outcome.status === 'succeeded' && bodies.length === 4 && r.records.length === 3600 && r.outcome.events.length === 6 && ms < 5000, `${ms} ms, ${bodies.length} requests, ${r.records.length} records, ${r.outcome.events.length} events, ${r.outcome.error}`);
+}
+
+// =============================== 0.5.2 (here_routing) ===================================
+// HERE Routing v8 (/v8/routes) through the trace, for self-serve HERE plans.
+
+const FLEX = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+/** Flexible polyline encoder (format v1, no third dimension), arithmetic only. */
+function encodeFlex(points, precision = 6) {
+  const u = (v) => { let out = ''; while (v >= 32) { out += FLEX[(v % 32) + 32]; v = Math.floor(v / 32); } return out + FLEX[v]; };
+  const sgn = (v) => u(v < 0 ? -2 * v - 1 : 2 * v);
+  const scale = 10 ** precision;
+  let out = u(1) + u(precision);
+  let pl = 0; let pn = 0;
+  for (const p of points) {
+    const la = Math.round(p.lat * scale); const ln = Math.round(p.lng * scale);
+    out += sgn(la - pl) + sgn(ln - pn); pl = la; pn = ln;
+  }
+  return out;
+}
+const parseLatLng = (v) => { const [lat, lng] = v.split('!')[0].split(',').map(Number); return { lat, lng }; };
+/** The waypoints of a /v8/routes GET, in order (origin, vias, destination). */
+function routeWaypoints(url) {
+  const q = String(url).split('?')[1].split('&');
+  const get = (k) => q.filter((x) => x.startsWith(k + '=')).map((x) => x.slice(k.length + 1));
+  return [parseLatLng(get('origin')[0]), ...get('via').map(parseLatLng), parseLatLng(get('destination')[0])];
+}
+/**
+ * Synthetic HERE Routing: one section whose polyline runs through the request's
+ * waypoints (shifted `shiftLng` degrees), one span per chunk carrying
+ * `limitFor(chunkNo)` km/h (null = no limit), name 'Test Rd', segment id `+here:cm:segment:<chunk>`.
+ */
+function mockRouting({ limitFor = () => 50, shiftLng = 0, urls = [], inits = [], fail = () => null } = {}) {
+  let chunkNo = 0;
+  return async (url, init) => {
+    urls.push(String(url));
+    inits.push(init);
+    const k = chunkNo++;
+    const failure = fail(k);
+    if (failure) return failure;
+    const wps = routeWaypoints(url).map((p) => ({ lat: p.lat, lng: p.lng + shiftLng }));
+    const limit = limitFor(k);
+    const span = { offset: 0, names: [{ value: 'Test Rd', language: 'en' }], length: 100, topologySegmentId: `+here:cm:segment:${k}`, ...(limit === null ? {} : { speedLimit: limit / 3.6 }) };
+    return json({ routes: [{ id: `r${k}`, sections: [{ id: `s${k}`, type: 'vehicle', polyline: encodeFlex(wps), spans: [span], transport: { mode: 'car' } }] }] });
+  };
+}
+const routingCfg = (extra = {}) => ({ provider: 'here_routing', lookupMode: 'trace', ...extra });
+
+// --- flexible polyline: the documented example, round trip, bad input -------------------
+{
+  const doc = [{ lat: 50.10228, lng: 8.69821 }, { lat: 50.10201, lng: 8.69567 }, { lat: 50.10063, lng: 8.6915 }, { lat: 50.09878, lng: 8.68752 }];
+  check('flexible polyline: the format document\'s example BFoz5xJ67i1B1B7PzIhaxL7Y decodes to its four points (precision 5)', JSON.stringify(conn.decodeFlexiblePolyline('BFoz5xJ67i1B1B7PzIhaxL7Y')) === JSON.stringify(doc));
+  check('flexible polyline: the test encoder reproduces the documented string (cross-check of the format)', encodeFlex(doc, 5) === 'BFoz5xJ67i1B1B7PzIhaxL7Y', encodeFlex(doc, 5));
+  const pts = [{ lat: 43.691826, lng: -79.530783 }, { lat: -33.868820, lng: 151.209296 }, { lat: 0, lng: 0 }];
+  check('flexible polyline: precision 6 round trip across hemispheres', JSON.stringify(conn.decodeFlexiblePolyline(encodeFlex(pts, 6))) === JSON.stringify(pts));
+  const p3 = conn.decodeFlexiblePolyline(encodeFlex([{ lat: 1, lng: 2 }], 5).replace(/^BF/, 'BlB') + 'A'); // header 0x25: precision 5, altitude, a 0 third value
+  let threw = ''; try { conn.decodeFlexiblePolyline('BF$$'); } catch (e) { threw = e.message; }
+  check('flexible polyline: a third dimension is read and dropped; an invalid character throws', p3.length === 1 && p3[0].lat === 1 && p3[0].lng === 2 && /invalid character/.test(threw), `${JSON.stringify(p3)} ${threw}`);
+}
+
+// --- the real Routing v8 answer (owner's account, 2026-10-23, Royal York Rd) -------------
+{
+  const sample = readJson('fixtures/connector/here-routes-royal-york.json');
+  const segs = conn.parseHereRoutingResponse(sample);
+  const sec = sample.routes[0].sections.map((x) => conn.decodeFlexiblePolyline(x.polyline).length - 1);
+  const s1 = segs.slice(0, sec[0]);
+  const s2 = segs.slice(sec[0], sec[0] + sec[1]);
+  const s3 = segs.slice(sec[0] + sec[1]);
+  check('routes sample: 3 sections decode to 13/15/15 points (12/14/14 segments), first point at the departure place', JSON.stringify(sec) === '[12,14,14]' && segs.length === 40 && Math.abs(segs[0].a.lat - 43.691826) < 1e-6 && Math.abs(segs[0].a.lng - -79.530783) < 1e-6, JSON.stringify(sec));
+  check('routes sample: every Royal York Rd segment is 50 km/h (speedLimit 13.8888893 m/s), named, with its topologySegmentId as linkId', segs.filter((x) => x.roadName === 'Royal York Rd').length === 20 && segs.filter((x) => x.roadName === 'Royal York Rd').every((x) => x.speedLimitKph === 50) && s1[1].linkId === '-here:cm:segment:451231029' && s1[6].linkId === '+here:cm:segment:398182398', JSON.stringify(s1.map((x) => [x.speedLimitKph, x.roadName, x.linkId])));
+  check('routes sample: spans expand offset..next offset (section 1: segments 0 | 1-5 | 6 | 7-10 | 11 Yorkleigh Ave)', JSON.stringify(s1.map((x) => x.linkId.split(':').pop())) === JSON.stringify(['470739570', '451231029', '451231029', '451231029', '451231029', '451231029', '398182398', '479305395', '479305395', '479305395', '479305395', '413217269']) && s1[11].roadName === 'Yorkleigh Ave');
+  check('routes sample: spans without speedLimit are null (section 2 from offset 10, the whole third section), unnamed', s2.slice(0, 10).every((x) => x.speedLimitKph === 50) && s2.slice(10).every((x) => x.speedLimitKph === null && x.roadName === undefined) && s3.length === 14 && s3.every((x) => x.speedLimitKph === null && x.roadName === undefined && /^[-+]here:cm:segment:/.test(x.linkId)), JSON.stringify(s3.map((x) => x.speedLimitKph)));
+  check('routes sample: no route (routes: [] with notices) parses to no segments', conn.parseHereRoutingResponse({ routes: [], notices: [{ code: 'couldNotMatchOrigin' }] }).length === 0 && conn.parseHereRoutingResponse({}).length === 0);
+}
+
+// --- nearest point on the route and the match radius -------------------------------------
+{
+  // One straight 222 m segment due north; vertices 111 m from its midpoint.
+  const segs = [{ a: { lat: 43.65, lng: -79.5 }, b: { lat: 43.652, lng: -79.5 }, speedLimitKph: 40, roadName: 'A', linkId: '+1' }, { a: { lat: 43.652, lng: -79.5 }, b: { lat: 43.652, lng: -79.497 }, speedLimitKph: 60, linkId: '+2' }];
+  const mPerDegLng = 111195 * Math.cos(43.651 * Math.PI / 180);
+  const mid30 = conn.matchToRoute(43.651, -79.5 + 30 / mPerDegLng, segs, 50);
+  const mid60 = conn.matchToRoute(43.651, -79.5 + 60 / mPerDegLng, segs, 50);
+  const mid60wide = conn.matchToRoute(43.651, -79.5 + 60 / mPerDegLng, segs, 100);
+  const east = conn.matchToRoute(43.65195, -79.4985, segs, 50);
+  check('matchToRoute: a sample 30 m beside the middle of a 222 m segment matches it (distance to the segment, not to its vertices 111 m away)', mid30.matched && mid30.speedLimitKph === 40 && mid30.roadName === 'A' && mid30.linkId === '+1' && Math.abs(mid30.distanceM - 30) < 0.5, JSON.stringify(mid30));
+  check('matchToRoute: 60 m away is unmatched at the default 50 m radius (null limit, distance reported) and matched at 100 m', !mid60.matched && mid60.speedLimitKph === null && Math.abs(mid60.distanceM - 60) < 0.5 && mid60wide.matched && mid60wide.speedLimitKph === 40, `${JSON.stringify(mid60)} ${JSON.stringify(mid60wide)}`);
+  check('matchToRoute: the nearest segment wins (a sample by the east leg gets 60); no route is unmatched', east.matched && east.speedLimitKph === 60 && east.linkId === '+2' && conn.matchToRoute(43.65, -79.5, [], 50).matched === false);
+}
+
+// --- request shape and the Royal York golden template, real answer -----------------------
+{
+  const tpl = readJson('fixtures/templates/overspeed-here-routing.json');
+  const fixture = readFileSync(join(root, 'fixtures/connector/here-routes-royal-york.json'), 'utf8');
+  const samples = csvSamples('fixtures/telemetry/royal-york-drive.csv');
+  const urls = [];
+  const inits = [];
+  useVirtualClock();
+  const r = await run(tpl, samples, async (url, init) => { urls.push(String(url)); inits.push(init); return new Response(fixture, { status: 200 }); });
+  realClock();
+  const u = urls[0] ?? '';
+  const q = u.split('?')[1]?.split('&') ?? [];
+  const vias = q.filter((x) => x.startsWith('via='));
+  const at = (sm) => `${sm.signals['gps.lat'].toFixed(6)},${sm.signals['gps.lon'].toFixed(6)}`;
+  check('routing request: one GET to https://router.hereapi.com/v8/routes with car, fast, departureTime=any, return=polyline, spans=speedLimit,names,length,segmentId and the key', urls.length === 1 && u.startsWith('https://router.hereapi.com/v8/routes?') && (inits[0]?.method ?? 'GET') === 'GET' && inits[0]?.body === undefined && ['transportMode=car', 'routingMode=fast', 'departureTime=any', 'return=polyline', 'spans=speedLimit,names,length,segmentId', 'apikey=test-key-0123456789'].every((x) => q.includes(x)), u);
+  check('routing request: origin = first sample, destination = last, the 28 between as via=lat,lng!passThrough=true in order (literal , and !)', q.includes(`origin=${at(samples[0])}`) && q.includes(`destination=${at(samples[29])}`) && vias.length === 28 && vias.every((v, i) => v === `via=${at(samples[i + 1])}!passThrough=true`), vias.slice(0, 2).join(' '));
+  const recs = r.records;
+  check('routing Royal York: 30 records in ts order, source here_routing, all matched; 21 on Royal York Rd at 50 with roadName and linkId', r.outcome.status === 'succeeded' && recs.length === 30 && recs.every((x, i) => x.ts === samples[i].ts && x.source === 'here_routing' && x.matched === true) && recs.slice(0, 21).every((x) => x.speedLimitKph === 50 && x.roadName === 'Royal York Rd' && /^[-+]here:cm:segment:\d+$/.test(x.linkId)), `${r.outcome.error} ${JSON.stringify(recs.map((x) => x.speedLimitKph))}`);
+  check('routing Royal York: the 9 samples on the unnamed road without a posted limit are null with matched true (reason no_answer)', recs.slice(21).every((x) => x.speedLimitKph === null && x.matched === true && x.reason === 'no_answer' && x.roadName === undefined), JSON.stringify(recs.slice(21)));
+  check('routing Royal York: one overspeed (64 for 15 s on the 50 road; 46 against the fallback 50 after); the summary counts requests, matched, unmatched and null-limit samples', r.outcome.events.length === 1 && /^21 speed-limit record\(s\) via here_routing \(trace\), 1 lookup\(s\), 9 null record\(s\), 9 without coverage, 30 sample\(s\) matched, 0 unmatched, 9 with a null limit, 1 chunk\(s\)$/.test(r.step('roads').output), `${r.outcome.events.length} | ${r.step('roads').output}`);
+}
+
+// --- chunking with overlap, owner chunks, joined routes -----------------------------------
+{
+  useVirtualClock();
+  const urls = [];
+  const samples = drive(25);
+  const r = await run(connectorGraph(routingCfg({ traceChunkPoints: 10, traceOverlapPoints: 4 })), samples, mockRouting({ urls, limitFor: (k) => 30 + k * 10 }));
+  realClock();
+  const wps = urls.map(routeWaypoints);
+  const firstIdx = wps.map((w) => samples.findIndex((sm) => Math.abs(sm.signals['gps.lat'] - w[0].lat) < 1e-7));
+  const limits = r.records.map((x) => x.speedLimitKph);
+  const want = samples.map((_, j) => (j < 8 ? 30 : j < 14 ? 40 : j < 20 ? 50 : 60));
+  check('routing chunks (10, overlap 4): 4 requests starting at samples 0, 6, 12, 18 with 10, 10, 10, 7 waypoints', urls.length === 4 && JSON.stringify(firstIdx) === '[0,6,12,18]' && JSON.stringify(wps.map((w) => w.length)) === '[10,10,10,7]', `${firstIdx} / ${wps.map((w) => w.length)}`);
+  check('routing chunks: each sample is matched on the route of the chunk that owns it (overlap split down the middle)', r.outcome.status === 'succeeded' && r.records.length === 25 && JSON.stringify(limits) === JSON.stringify(want) && r.records.every((x) => x.matched && x.roadName === 'Test Rd'), JSON.stringify(limits));
+  useVirtualClock();
+  const urls0 = [];
+  const r0 = await run(connectorGraph(routingCfg({ traceChunkPoints: 10, traceOverlapPoints: 0 })), drive(20), mockRouting({ urls: urls0 }));
+  realClock();
+  const w0 = urls0.map(routeWaypoints);
+  check('routing chunks: overlap 0 is raised to 1, so each route starts where the previous one ended (no unrouted gap)', r0.outcome.status === 'succeeded' && w0.length === 3 && w0[1][0].lat === w0[0][9].lat && w0[2][0].lat === w0[1][9].lat && r0.records.every((x) => x.matched), JSON.stringify(w0.map((w) => [w.length, w[0].lat, w.at(-1).lat])));
+}
+
+// --- decimation default, the radius through the executor, a single position --------------
+{
+  useVirtualClock();
+  const parked = Array.from({ length: 10 }, (_, i) => ({ ts: 1_792_000_000_000 + i * 1000, signals: { 'gps.lat': 43.65 + (i % 2) * 0.00001, 'gps.lon': -79.5, 'gps.speed': 0 } }));
+  const moving = drive(10, { t0: 1_792_000_010_000, lat0: 43.6502 });
+  const urls = [];
+  const r = await run(connectorGraph(routingCfg()), [...parked, ...moving], mockRouting({ urls }));
+  check('routing default traceMinSpacingM 10: ten parked samples (1 m jitter) send one waypoint; every sample is still matched by its own position', r.outcome.status === 'succeeded' && urls.length === 1 && routeWaypoints(urls[0]).length === 11 && r.records.length === 20 && r.records.every((x) => x.matched && x.speedLimitKph === 50), `${urls.length} ${urls[0] && routeWaypoints(urls[0]).length} ${r.outcome.error}`);
+  const far = await run(connectorGraph(routingCfg()), drive(10), mockRouting({ shiftLng: 0.001 })); // route ~80 m east
+  const wide = await run(connectorGraph(routingCfg({ traceMatchRadiusM: 100 })), drive(10), mockRouting({ shiftLng: 0.001 }));
+  check('routing radius: a route ~80 m from every sample leaves them unmatched (null, matched false, reason no_answer); traceMatchRadiusM 100 matches them', far.outcome.status === 'succeeded' && far.records.length === 10 && far.records.every((x) => x.speedLimitKph === null && x.matched === false && x.reason === 'no_answer') && /0 sample\(s\) matched, 10 unmatched/.test(far.step('roads').output) && wide.records.every((x) => x.matched && x.speedLimitKph === 50), `${far.step('roads').output} | ${JSON.stringify(wide.records[0])}`);
+  let calls = 0;
+  const one = await run(connectorGraph(routingCfg()), parked, async () => { calls++; return json({}); });
+  check('routing: a whole input at one position sends no request; its samples are unmatched', one.outcome.status === 'succeeded' && calls === 0 && one.records.length === 10 && one.records.every((x) => x.matched === false && x.reason === 'no_answer'), `${calls} ${one.outcome.error}`);
+  const noRoute = await run(connectorGraph(routingCfg()), drive(5), async () => json({ routes: [], notices: [{ title: 'Could not match origin', code: 'couldNotMatchOrigin', severity: 'critical' }] }));
+  check('routing: an answer without a route leaves the chunk\'s samples unmatched (no failure)', noRoute.outcome.status === 'succeeded' && noRoute.records.every((x) => x.matched === false && x.speedLimitKph === null), noRoute.outcome.error);
+  realClock();
+}
+
+// --- 429 then success, chunk failures, the key, the cap ------------------------------------
+{
+  const clock = useVirtualClock();
+  let n = 0;
+  const routing = mockRouting();
+  const r = await run(connectorGraph(routingCfg({ traceChunkPoints: 10 })), drive(18), (url, init) => (++n === 1 ? json({ error: 'Too Many Requests' }, 429, { 'Retry-After': '1' }) : routing(url, init)));
+  realClock();
+  check('routing 429: the first chunk is retried after Retry-After 1 s, then both chunks answer', r.outcome.status === 'succeeded' && n === 3 && clock.sleeps.includes(1000) && r.records.length === 18 && r.records.every((x) => x.matched && x.speedLimitKph === 50) && /, 2 lookup\(s\), 1 retry/.test(r.step('roads').output), `${r.outcome.error} | ${r.step('roads').output} | ${clock.sleeps}`);
+}
+{
+  useVirtualClock();
+  const failMid = (k) => (k === 1 ? json({ error: 'boom' }, 500) : null);
+  const ok = await run(connectorGraph(routingCfg({ traceChunkPoints: 10, traceOverlapPoints: 1, onLookupError: 'skip', maxErrorRatio: 0.5, retry: { attempts: 1 } })), drive(28), mockRouting({ fail: failMid }));
+  const shape = ok.records.map((x) => (x.speedLimitKph === null ? x.reason : 'ok'));
+  check('routing chunk failure with skip: the run stays green, the failed chunk\'s samples are null (reason error)', ok.outcome.status === 'succeeded' && shape.length === 28 && shape.slice(9, 18).every((x) => x === 'error') && shape.slice(0, 9).concat(shape.slice(18)).every((x) => x === 'ok'), `${ok.outcome.error} ${shape}`);
+  const failed = await run(connectorGraph(routingCfg({ traceChunkPoints: 10, traceOverlapPoints: 1, retry: { attempts: 1 } })), drive(28), mockRouting({ fail: failMid }));
+  check('routing chunk failure with fail (default): the node fails naming the chunk', failed.outcome.status === 'failed' && /HERE Routing request failed \(HTTP 500, points 9-18\)/.test(failed.outcome.error), failed.outcome.error);
+  const key = await run(connectorGraph(routingCfg({ onLookupError: 'skip' })), drive(3), async (url) => json({ error: 'Unauthorized', request: String(url) }, 401));
+  check('routing: a rejected key (401) fails the node even with skip, key redacted', key.outcome.status === 'failed' && key.outcome.error.startsWith('HERE Routing rejected the API key (HTTP 401)') && !key.outcome.error.includes('test-key-0123456789'), key.outcome.error);
+  const urls = [];
+  const capped = await run(connectorGraph(routingCfg({ traceChunkPoints: 10, traceOverlapPoints: 1, maxLookupsPerRun: 2 })), drive(28), mockRouting({ urls }));
+  const reasons = capped.records.map((x) => x.reason ?? 'ok');
+  check('routing cap: maxLookupsPerRun counts route requests; samples owned by unsent chunks are null (reason capped)', capped.outcome.status === 'succeeded' && urls.length === 2 && reasons.slice(0, 18).every((x) => x === 'ok') && reasons.slice(18).every((x) => x === 'capped') && /10 skipped by lookup cap/.test(capped.step('roads').output), `${reasons} | ${capped.step('roads').output}`);
+  realClock();
+}
+
+// --- where here_routing does not run ------------------------------------------------------
+{
+  const point = await run(connectorGraph({ provider: 'here_routing' }), drive(3), mockRouting());
+  check('here_routing in point mode (the default lookupMode) fails at start naming lookupMode trace', point.outcome.status === 'failed' && /provider 'here_routing' runs in lookupMode 'trace' only/.test(point.outcome.error), point.outcome.error);
+  const live = await run(connectorGraph(routingCfg()), drive(3), mockRouting(), { mode: 'live' });
+  check('here_routing in a live run fails at start (batch and simulation only)', live.outcome.status === 'failed' && /runs in batch and simulation runs only/.test(live.outcome.error), live.outcome.error);
+  const big = await run(connectorGraph(routingCfg({ traceChunkPoints: 101 })), drive(3), mockRouting());
+  check('here_routing with traceChunkPoints above 100 fails at start (HERE recommends at most 100 waypoints per route)', big.outcome.status === 'failed' && /traceChunkPoints 101 is above 100 for provider 'here_routing'/.test(big.outcome.error), big.outcome.error);
+}
+
+// --- a 1 h drive, production-shaped graph, mocked HERE Routing -----------------------------
+{
+  const tpl = readJson('fixtures/templates/overspeed-here-routing.json');
+  // 3600 samples at 1 Hz, ~12 m apart (every one kept at the 10 m default spacing);
+  // 60 km/h for two minutes in every ten (limit 50), else 40.
+  const samples = Array.from({ length: 3600 }, (_, s) => ({ ts: 1_792_000_000_000 + s * 1000, signals: { 'gps.lat': 43.6 + s * 0.00011, 'gps.lon': -79.5, 'gps.speed': s % 600 < 120 ? 60 : 40, 'gps.heading': 0 } }));
+  const urls = [];
+  const expected = conn.planTraceChunks(3600, 50, 2).length; // 1 + ceil((3600 - 50) / 48) = 75 (ceil(3600 / 50) = 72 without overlap)
+  useVirtualClock();
+  const started = Date.now();
+  const r = await run(tpl, samples, mockRouting({ urls }));
+  const ms = Date.now() - started;
+  realClock();
+  console.log(`     (1 h here_routing drive wall time: ${ms} ms, ${urls.length} requests)`);
+  check(`1 h drive (3600 samples), here_routing defaults (50 points, overlap 2): ${expected} route requests, each <= 50 waypoints, 3600 matched records, 6 overspeed events, well under 5 s`, r.outcome.status === 'succeeded' && expected === 75 && urls.length === expected && urls.every((u) => routeWaypoints(u).length <= 50) && r.records.length === 3600 && r.records.every((x) => x.matched && x.speedLimitKph === 50) && r.outcome.events.length === 6 && ms < 5000, `${ms} ms, ${urls.length} requests, ${r.records.length} records, ${r.outcome.events.length} events, ${r.outcome.error}`);
 }
 
 if (failed) {
