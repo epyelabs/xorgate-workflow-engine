@@ -4,13 +4,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
-## Unreleased
+## 0.5.1 (2026-10-23)
+
+Elastic batch channels with a stall detector, and a hardened
+`connector.third_party` (pacing, retries, timeouts, an error budget,
+no-answer records, HERE trace mode) with a `logic.comparator` that can expire
+or fall back from a stale reference. The core catalog moves from
+`f8861576c807e382` to `92697a69913738c4` (28 nodes); without `core/function`
+the 26 other defs hash to `22138d958ba19520`. Every change is additive
+(minor-level under `docs/compatibility.md`), released as 0.5.1.
+
+**Upgrade notes.** Hosts that read step statuses (the platform's core
+service included) must accept the new value `cancelled`, and core must bump
+`EXPECTED_CATALOG_VERSION` to `92697a69913738c4`. The new connector and
+comparator config fields are optional with defaults that keep existing
+templates valid. HERE and Google Roads lookups are now paced by default (5 and
+10 requests per second; `maxRequestsPerSecond` overrides), so large point-mode
+runs take longer than on 0.5.0. Trace mode (`lookupMode: 'trace'`) is HERE
+only and batch/simulation only; a live run or another provider fails at
+start.
 
 ### Runtime
 
 Elastic channels and a stall detector (plan `workflow-engine-improvements`
-P0.1 + P0.2). The core `catalogVersion` does not move
-(`f8861576c807e382`): no node definition changed.
+P0.1 + P0.2). This part moves no node definition (the catalog moves with
+the connector and comparator changes below).
 
 - **Elastic channels in `batch` and `simulation` runs.** Every edge whose
   channel is not `frames` or `video` is now unbounded (new `ChannelPolicy`
@@ -72,7 +90,7 @@ P0.1 + P0.2). The core `catalogVersion` does not move
 
 ### Connector and comparator
 
-A minor under `docs/compatibility.md`: additive optional config on
+Additive under `docs/compatibility.md`: optional config on
 `connector.third_party` and `logic.comparator`, additive fields on their
 records, new exports from the connector module. The core catalog moves from
 `f8861576c807e382` to `92697a69913738c4` (28 nodes; `4b1a1732646c0e0d` at the P0.3 commit); without `core/function`
