@@ -4,7 +4,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
-## Unreleased
+## 0.5.2 (2026-10-23)
 
 A `here_routing` speed-limit provider for `connector.third_party`, so HERE
 speed limits work on a self-serve HERE plan: Route Matching v8 answers those
@@ -12,9 +12,9 @@ accounts `429` ("0 per 10 s"), while the Routing API v8 (`/v8/routes`, 10
 requests per second on that plan) is allowed. The core catalog moves from
 `92697a69913738c4` to `51116ae4e9dd8ba4` (28 nodes); without `core/function`
 the 26 other defs move from `22138d958ba19520` to `d55afc8c80c2a44f`. Every
-change is additive (minor-level under `docs/compatibility.md`).
+change is additive (minor-level under `docs/compatibility.md`), released as 0.5.2.
 
-**Upgrade notes.** Core must bump `EXPECTED_CATALOG_VERSION` to
+**Upgrade notes.** New catalog hash: core must bump `EXPECTED_CATALOG_VERSION` to
 `51116ae4e9dd8ba4`. Existing templates parse and run unchanged: `provider`
 gains an enum value, `traceMatchRadiusM` is new with a default, and
 `traceChunkPoints`, `traceOverlapPoints` and `traceMinSpacingM` no longer
