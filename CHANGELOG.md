@@ -4,6 +4,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
+## Unreleased
+
+An external cancel seam for hosts that stop a run on request (the platform's
+"cancel simulation"). Additive only (minor-level under `docs/compatibility.md`):
+no contract changes shape, the catalog hash does not move, and the
+`result.json` / progress `status` enums are unchanged.
+
+### Added
+
+- `engine.run({ signal })` and `runGraph(spec, { signal })`: an optional
+  `AbortSignal`. When it aborts mid-run, every still-running node is stopped
+  through the path the deadline and the stall detector use; those steps land
+  `cancelled` with output `cancelled: <reason>` (a string reason as is, an
+  Error's message, `run cancelled` for a bare `abort()`). The deadline timer
+  and the stall detector are cleared at once. The run resolves (it does not
+  reject) with `status: "failed"`, `error: "Run cancelled"` (exported as
+  `RUN_CANCELLED_ERROR`) and `cancelled: true`; a node that had already
+  failed keeps its failed step and `failedNodeId`. A signal that is already
+  aborted refuses the run before any executor starts (no steps;
+  `engine.run` still binds the host and writes `result.json`, and never
+  reports `running` on the progress stream). An abort after the run settled,
+  or after the deadline or the stall detector already stopped it, is a
+  no-op, and the listener is removed when the graph settles. Like the
+  deadline, a node busy in its own await stops at its next yield. A
+  `signal` that is not an AbortSignal is an `XweUsageError`.
+- `result.json` and `EngineRunOutcome` gain an optional `cancelled: true`,
+  present only on a cancelled run (never `false`), so every other run's
+  `result.json` is byte-for-byte as before and a reader on the 0.5.2 schema
+  strips it. `status` stays `failed` for a cancelled run on purpose: hosts
+  and finalizers that switch on `succeeded | failed` keep working.
+
 ## 0.5.2 (2026-10-23)
 
 A `here_routing` speed-limit provider for `connector.third_party`, so HERE

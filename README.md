@@ -97,6 +97,13 @@ xwe doctor                                                    # ffmpeg, ONNX Run
   pre-0.5.1 behaviour. A stall detector (`stallMs`, default 30 s, 0 disables)
   fails a graph whose running nodes are all parked with no progress, and the
   nodes still running at a stall or deadline are reported `cancelled`.
+- **Cancel**: `engine.run({ signal })` takes an `AbortSignal`. Aborting it
+  stops the run through the same path as the deadline: still-running nodes
+  are reported `cancelled` (`cancelled: <reason>`), and the run resolves with
+  `result.status === "failed"`, `result.error === "Run cancelled"` and
+  `result.cancelled === true`, `result.json` still written. An
+  already-aborted signal refuses the run before any node starts; an abort
+  after the run settled is a no-op.
 - **Exit codes**: `0` success; `1` the run failed (the failing node is named,
   `result.json` still written); `2` usage or configuration, nothing ran.
 - **Logging**: `--log-level silent | error | info | debug` on any command

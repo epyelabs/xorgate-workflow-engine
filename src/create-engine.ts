@@ -88,6 +88,25 @@ export interface EngineRunOptions {
   /** Wall-clock budget; on expiry everything is cancelled and the run fails. */
   deadlineMs?: number;
   /**
+   * External cancel (0.5.3). Aborting it mid-run stops every still-running
+   * node through the same path as `deadlineMs` and the stall detector: those
+   * steps land `cancelled` with output `cancelled: <reason>` (the signal's
+   * string or Error reason; a bare `controller.abort()` reads
+   * `run cancelled`). The run still resolves (it does not reject) and still
+   * writes result.json, with `status: "failed"`, `error: "Run cancelled"` and
+   * `cancelled: true` (the status enum is unchanged). An already-aborted
+   * signal refuses the run before any node starts: same result, no steps.
+   * Aborting after the run settled is a no-op.
+   *
+   * ```ts
+   * const ac = new AbortController();
+   * const pending = engine.run({ template, inputs, signal: ac.signal });
+   * ac.abort('stopped by operator');
+   * const { result } = await pending; // result.cancelled === true
+   * ```
+   */
+  signal?: AbortSignal;
+  /**
    * Channel policy for batch and simulation runs (0.5.1): `elastic` (default)
    * makes every non-frames/video edge unbounded; `bounded` blocks every edge
    * at the channel capacity (the pre-0.5.1 behaviour). See `EngineRunDeps`.
@@ -344,6 +363,16 @@ export function createEngine(options: CreateEngineOptions): Engine {
     catalog,
     async run(runOptions: EngineRunOptions): Promise<EngineRunResult> {
       const startedAt = Date.now();
+      const signal = runOptions.signal;
+      if (
+        signal !== undefined &&
+        (signal === null ||
+          typeof signal !== 'object' ||
+          typeof signal.aborted !== 'boolean' ||
+          typeof signal.addEventListener !== 'function')
+      ) {
+        throw new XweUsageError('run: signal must be an AbortSignal (new AbortController().signal)');
+      }
       const manifest = resolveRunManifest(runOptions, catalog);
       const runId = runOptions.runId ?? manifest.runId;
       logger.debug(
@@ -373,7 +402,8 @@ export function createEngine(options: CreateEngineOptions): Engine {
         runOptions.deadlineMs ??
         (manifest.limits.maxRuntimeSeconds ? manifest.limits.maxRuntimeSeconds * 1000 : undefined);
 
-      progress?.runStatus({ status: 'running' });
+      // A pre-aborted signal never reports `running`: runGraph refuses it.
+      if (!signal?.aborted) progress?.runStatus({ status: 'running' });
       let outcome: EngineRunOutcome;
       try {
         outcome = await runGraph(
@@ -394,6 +424,7 @@ export function createEngine(options: CreateEngineOptions): Engine {
             ...(bound.httpFetch ? { httpFetch: bound.httpFetch } : {}),
             ...(progress ? { progress } : {}),
             ...(deadlineMs ? { deadlineMs } : {}),
+            ...(signal ? { signal } : {}),
             ...(runOptions.channelMode ? { channelMode: runOptions.channelMode } : {}),
             ...(runOptions.stallMs !== undefined ? { stallMs: runOptions.stallMs } : {}),
             ...(webhookSink && webhookSink.secrets.length > 0 ? { redact: webhookSink.secrets } : {}),

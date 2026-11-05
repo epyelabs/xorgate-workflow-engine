@@ -109,6 +109,12 @@ export const engineResultSchema = z.object({
   status: z.enum(['succeeded', 'failed']),
   error: z.string().nullable(),
   failedNodeId: z.string().nullable(),
+  /**
+   * 0.5.3: present (`true`) only on a run stopped by `run({ signal })`;
+   * `status` is then `failed` and `error` `Run cancelled`. Optional, so an
+   * older result.json parses, and an older reader strips it.
+   */
+  cancelled: z.literal(true).optional(),
   steps: z.array(engineStepSchema),
   events: z.array(engineEventSchema),
   metrics: z.record(z.string(), z.union([z.number(), z.string()])),
@@ -152,6 +158,7 @@ export function buildEngineResult(
     status: outcome.status,
     error: outcome.error,
     failedNodeId: outcome.failedNodeId,
+    ...(outcome.cancelled ? { cancelled: true as const } : {}),
     steps: outcome.steps,
     events: outcome.events.map((e) => ({ ...e, clipKey: null })),
     metrics: outcome.metrics,

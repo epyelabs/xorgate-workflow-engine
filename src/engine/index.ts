@@ -38,8 +38,9 @@ import { createRedactor } from './redact';
  *
  * A stall detector (`stallMs`, default 30 s) fails a run whose running nodes
  * are all parked on channel operations with no progress for that long, and
- * names who waits on whom. A deadline or a stall marks still-running nodes
- * `cancelled` (with the reason) rather than `skipped`.
+ * names who waits on whom. A deadline, a stall or an external abort
+ * (`signal`, 0.5.3) marks still-running nodes `cancelled` (with the reason)
+ * rather than `skipped`.
  *
  * Storage-free by design: sources read through the EngineSourceReader seam,
  * outputs collect through ctx callbacks, and the deploy target (Lambda handler,
@@ -112,6 +113,19 @@ export interface EngineRunDeps {
   /** Wall-clock budget; on expiry everything is cancelled and the run fails. */
   deadlineMs?: number;
   /**
+   * External cancel seam (0.5.3). When it aborts mid-run, every still-running
+   * node is stopped through the same path the deadline and the stall
+   * detector use: its step lands `cancelled` with output
+   * `cancelled: <reason>` (the signal's string or Error reason; a bare
+   * `controller.abort()` reads `run cancelled`). The run resolves `failed`
+   * with error `Run cancelled` and `cancelled: true`. An already-aborted
+   * signal refuses the run before any executor starts (no steps). An abort
+   * after the run settled, or after the deadline or the stall detector
+   * already stopped it, is a no-op. Like the deadline, a node busy in its own
+   * await (I/O, a child process) stops at its next yield.
+   */
+  signal?: AbortSignal;
+  /**
    * Diagnostics with their level: `info` for executors' `ctx.log` lines and
    * the deadline notice, `debug` for the engine's own trace (graph wiring,
    * per-node timings). A one-argument function still works; it sees `info`
@@ -131,7 +145,7 @@ export interface EngineStep {
   seq: number;
   nodeId: string;
   label: string;
-  /** `cancelled` (0.5.1): still running when the deadline or the stall detector stopped the run. */
+  /** `cancelled` (0.5.1): still running when the deadline, the stall detector or (0.5.3) an abort stopped the run. */
   status: 'ok' | 'failed' | 'skipped' | 'cancelled';
   output: string;
   durationMs: number;
@@ -147,6 +161,11 @@ export interface EngineRunOutcome {
   captures: Record<string, unknown[]>;
   metrics: { nodes: number; okSteps: number; events: number; messages: number };
   /**
+   * `true` (0.5.3) when `signal` aborted the run; `status` is then `failed`
+   * and `error` is `Run cancelled`. Absent otherwise (never `false`).
+   */
+  cancelled?: true;
+  /**
    * Per-edge channel statistics (0.5.1). In memory only: `result.json` does
    * not carry them (buildEngineResult picks its fields).
    */
@@ -156,7 +175,7 @@ export interface EngineRunOutcome {
 interface NodeState {
   status: 'running' | 'ok' | 'failed' | 'skipped' | 'cancelled';
   aborted: boolean;
-  /** Set when the deadline or the stall detector stopped this node while it ran. */
+  /** Set when the deadline, the stall detector or an abort stopped this node while it ran. */
   cancelReason: string | null;
   error: string | null;
   summary: string | null;
@@ -214,6 +233,26 @@ function failedOutcome(spec: EngineGraphSpec, failedNodeId: string | null, error
   };
 }
 
+/** Error of a run stopped by `EngineRunDeps.signal`. */
+export const RUN_CANCELLED_ERROR = 'Run cancelled';
+
+/**
+ * The step-level reason for an aborted signal: a string reason as is, an
+ * Error's message, and `run cancelled` for a bare `abort()` (whose default
+ * reason is a DOMException named AbortError) or an empty reason.
+ */
+export function abortReasonText(signal: AbortSignal): string {
+  const reason: unknown = signal.reason;
+  if (typeof reason === 'string') return reason.trim() || 'run cancelled';
+  if (reason instanceof Error) {
+    if (reason.name === 'AbortError') return 'run cancelled';
+    return reason.message.trim() || 'run cancelled';
+  }
+  if (reason === undefined || reason === null) return 'run cancelled';
+  if (typeof reason === 'number' || typeof reason === 'boolean' || typeof reason === 'bigint') return String(reason);
+  return 'run cancelled';
+}
+
 export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Promise<EngineRunOutcome> {
   const def = spec.definition;
   // Secret hygiene: values read through the secrets seam are scrubbed from
@@ -228,6 +267,13 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
   const channelMode = deps.channelMode ?? 'elastic';
   const stallMs = deps.stallMs ?? DEFAULT_STALL_MS;
   const catalog = deps.catalog ?? coreCatalog;
+  const signal = deps.signal;
+
+  // Already aborted: refuse before anything starts, like a pre-flight failure.
+  if (signal?.aborted) {
+    log(`run cancelled before start (${abortReasonText(signal)})`);
+    return { ...failedOutcome(spec, null, RUN_CANCELLED_ERROR), cancelled: true };
+  }
 
   // Pre-flight structural guards (published definitions already pass these;
   // fail like the PoC runner did, with no steps).
@@ -311,6 +357,7 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
   let firstFailure: { nodeId: string; error: string } | null = null;
   let timedOut = false;
   let stalledError: string | null = null;
+  let cancelled = false;
   if (edgeChannels.length > 0) {
     const counts = new Map<string, number>();
     for (const e of edgeChannels) {
@@ -533,7 +580,7 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
   let deadlineTimer: NodeJS.Timeout | undefined;
   if (deps.deadlineMs !== undefined) {
     deadlineTimer = setTimeout(() => {
-      if (stalledError !== null) return;
+      if (stalledError !== null || cancelled) return;
       timedOut = true;
       stopAll(
         (_id, waits) =>
@@ -553,7 +600,7 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
     // Deliberately not unref'd: a graph parked on promises alone would let
     // the process exit with no result; the detector keeps it alive to fail it.
     stallTimer = setInterval(() => {
-      if (timedOut || stalledError !== null) return;
+      if (timedOut || stalledError !== null || cancelled) return;
       let mark = messagesTotal;
       for (const e of edgeChannels) mark += e.channel.ops;
       for (const st of states.values()) if (st.status !== 'running') mark += 1;
@@ -578,11 +625,40 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
     }, checkEvery);
   }
 
+  const clearTimers = (): void => {
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    if (stallTimer !== undefined) clearInterval(stallTimer);
+    deadlineTimer = undefined;
+    stallTimer = undefined;
+  };
+
+  // The external cancel seam: the same stop path as the deadline and the
+  // stall detector. A run the deadline or the detector already stopped keeps
+  // that verdict; the listener is removed once the graph settles, so a late
+  // abort is a no-op.
+  let settled = false;
+  const onAbort = (): void => {
+    if (settled || cancelled || timedOut || stalledError !== null || !signal) return;
+    // Every node already finished (the graph is settling): nothing to stop.
+    const live = def.nodes.some((n) => {
+      const st = states.get(n.id)!;
+      return st.status === 'running' && !st.aborted;
+    });
+    if (!live) return;
+    cancelled = true;
+    clearTimers();
+    const reason = abortReasonText(signal);
+    log(`run cancelled (${reason}); cancelling all nodes`);
+    stopAll(() => reason);
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+
   try {
     await Promise.all(def.nodes.map((n) => runNode(n.id)));
   } finally {
-    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-    if (stallTimer !== undefined) clearInterval(stallTimer);
+    settled = true;
+    signal?.removeEventListener('abort', onAbort);
+    clearTimers();
   }
 
   const channelStats: EngineChannelStat[] = edgeChannels.map((e) => ({
@@ -605,15 +681,22 @@ export async function runGraph(spec: EngineGraphSpec, deps: EngineRunDeps): Prom
 
   const okSteps = steps.filter((s) => s.status === 'ok').length;
   const failed = firstFailure as { nodeId: string; error: string } | null;
+  // A cancel wins the error (the operator asked for it); a node that failed
+  // before the abort keeps its failedNodeId and its failed step.
   const outcome: EngineRunOutcome = redactor.deep({
-    status: failed || timedOut || stalledError !== null ? 'failed' : 'succeeded',
-    error: failed ? failed.error : stalledError ?? (timedOut ? 'Run exceeded its max runtime' : null),
+    status: cancelled || failed || timedOut || stalledError !== null ? 'failed' : 'succeeded',
+    error: cancelled
+      ? RUN_CANCELLED_ERROR
+      : failed
+        ? failed.error
+        : stalledError ?? (timedOut ? 'Run exceeded its max runtime' : null),
     failedNodeId: failed ? failed.nodeId : null,
     steps,
     events,
     captures,
     metrics: { nodes: def.nodes.length, okSteps, events: events.length, messages: messagesTotal },
   });
+  if (cancelled) outcome.cancelled = true;
   // Numbers only (Infinity survives); kept out of the redactor's deep copy.
   outcome.channels = channelStats;
   return outcome;

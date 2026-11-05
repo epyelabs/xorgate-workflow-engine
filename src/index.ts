@@ -31,7 +31,7 @@ export { scrubSecretEnv, SECRET_ENV_PREFIX, WEBHOOK_ENV_PREFIX } from './engine/
 export { REDACTED } from './engine/redact';
 
 // Low level: the core and its seams
-export { runGraph, DEFAULT_CHANNEL_CAPACITY } from './engine/index';
+export { runGraph, DEFAULT_CHANNEL_CAPACITY, RUN_CANCELLED_ERROR } from './engine/index';
 export type { EngineGraphSpec, EngineRunDeps, EngineRunOutcome, EngineStep } from './engine/index';
 export type {
   Channel,
