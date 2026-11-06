@@ -4,12 +4,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the
 version number follows the policy in [docs/compatibility.md](./docs/compatibility.md)
 (contracts first, the catalog hash named whenever it moves).
 
-## Unreleased
+## 0.5.3 (2026-11-06)
 
 An external cancel seam for hosts that stop a run on request (the platform's
 "cancel simulation"). Additive only (minor-level under `docs/compatibility.md`):
-no contract changes shape, the catalog hash does not move, and the
-`result.json` / progress `status` enums are unchanged.
+no contract changes shape, the catalog hash stays `51116ae4e9dd8ba4`, and the
+`result.json` / progress `status` enums are unchanged. Released as 0.5.3.
+
+**Upgrade notes.** Nothing required: `EXPECTED_CATALOG_VERSION` is unchanged
+and every 0.5.2 host runs as before. A host that wants to stop a run on
+request passes `signal` to `engine.run` and treats `cancelled: true` on the
+result as "stopped by the host", not as a graph failure.
 
 ### Added
 
